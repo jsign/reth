@@ -13,8 +13,8 @@ macro_rules! general_state_test {
                 .join("ethereum-tests")
                 .join("BlockchainTests");
 
-            BlockchainTests::new(suite_path, format!("GeneralStateTests/{}", stringify!($dir)))
-                .run();
+            BlockchainTests::new(suite_path)
+                .run_only(&format!("GeneralStateTests/{}", stringify!($dir)));
         }
     };
 }
@@ -93,7 +93,7 @@ macro_rules! blockchain_test {
                 .join("ethereum-tests")
                 .join("BlockchainTests");
 
-            BlockchainTests::new(suite_path, format!("{}", stringify!($dir))).run();
+            BlockchainTests::new(suite_path).run_only(&format!("{}", stringify!($dir)));
         }
     };
 }

@@ -12,26 +12,29 @@ pub trait Suite {
     /// The type of test cases in this suite.
     type Case: Case;
 
-    /// The name of the test suite used to locate the individual test cases.
-    ///
-    /// # Example
-    ///
-    /// - `GeneralStateTests`
-    /// - `BlockchainTests/InvalidBlocks`
-    /// - `BlockchainTests/TransitionTests`
-    fn suite_name(&self) -> String;
+    /// The path to the test suite directory.
+    fn suite_path(&self) -> PathBuf;
 
-    /// The base path to the test suite directory.
-    fn suite_base_path(&self) -> PathBuf;
+    /// Run all test cases in the suite.
+    fn run(&self) {
+        // Walk all the first level folders of suite_path and call run_only for each
+        let suite_path = self.suite_path();
+        for entry in WalkDir::new(suite_path).min_depth(1).max_depth(1) {
+            let entry = entry.expect("Failed to read directory");
+            if entry.file_type().is_dir() {
+                self.run_only(entry.file_name().to_string_lossy().as_ref());
+            }
+        }
+    }
 
-    /// Load and run each contained test case.
+    /// Load and run each contained test case for the provided sub-folder.
     ///
     /// # Note
     ///
     /// This recursively finds every test description in the resulting path.
-    fn run(&self) {
+    fn run_only(&self, name: &str) {
         // Build the path to the test suite directory
-        let suite_path = self.suite_base_path().join(self.suite_name());
+        let suite_path = self.suite_path().join(name);
 
         // Verify that the path exists
         assert!(suite_path.exists(), "Test suite path does not exist: {suite_path:?}");
@@ -49,7 +52,7 @@ pub trait Suite {
         let results = Cases { test_cases }.run();
 
         // Assert that all tests in the suite pass
-        assert_tests_pass(&self.suite_name(), &suite_path, &results);
+        assert_tests_pass(name, &suite_path, &results);
     }
 }
 

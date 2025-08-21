@@ -13,5 +13,5 @@ pub struct TestRunnerCommand {
 
 fn main() {
     let cmd = TestRunnerCommand::parse();
-    BlockchainTests::new(cmd.suite_path, "blockchain_tests".to_string()).run();
+    BlockchainTests::new(cmd.suite_path.join("blockchain_tests")).run();
 }

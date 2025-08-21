@@ -35,24 +35,19 @@ use std::{
 #[derive(Debug)]
 pub struct BlockchainTests {
     suite_path: PathBuf,
-    suite_name: String,
 }
 
 impl BlockchainTests {
-    /// Create a new handler for a subset of the blockchain test suite.
-    pub const fn new(suite_path: PathBuf, suite_name: String) -> Self {
-        Self { suite_path, suite_name }
+    /// Create a new suite for the blockchain tests.
+    pub const fn new(suite_path: PathBuf) -> Self {
+        Self { suite_path }
     }
 }
 
 impl Suite for BlockchainTests {
     type Case = BlockchainTestCase;
 
-    fn suite_name(&self) -> String {
-        self.suite_name.clone()
-    }
-
-    fn suite_base_path(&self) -> PathBuf {
+    fn suite_path(&self) -> PathBuf {
         self.suite_path.clone()
     }
 }
