@@ -13,11 +13,10 @@ pub trait Suite {
     type Case: Case;
 
     /// The path to the test suite directory.
-    fn suite_path(&self) -> PathBuf;
+    fn suite_path(&self) -> &Path;
 
     /// Run all test cases in the suite.
     fn run(&self) {
-        // Walk all the first level folders of suite_path and call run_only for each
         let suite_path = self.suite_path();
         for entry in WalkDir::new(suite_path).min_depth(1).max_depth(1) {
             let entry = entry.expect("Failed to read directory");

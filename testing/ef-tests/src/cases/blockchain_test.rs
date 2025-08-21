@@ -38,7 +38,7 @@ pub struct BlockchainTests {
 }
 
 impl BlockchainTests {
-    /// Create a new suite for the blockchain tests.
+    /// Create a new suite for tests with blockchain tests format.
     pub const fn new(suite_path: PathBuf) -> Self {
         Self { suite_path }
     }
@@ -47,8 +47,8 @@ impl BlockchainTests {
 impl Suite for BlockchainTests {
     type Case = BlockchainTestCase;
 
-    fn suite_path(&self) -> PathBuf {
-        self.suite_path.clone()
+    fn suite_path(&self) -> &Path {
+        &self.suite_path
     }
 }
 
@@ -186,18 +186,25 @@ impl Case for BlockchainTestCase {
 /// - It then verifies that the resulting blockchain state (post-state) matches the expected
 ///   outcome.
 ///
+/// If is called with `only_stateless` set to true, it will only run the test in stateless mode
+/// using the provided test execution witness. Otherwise, it runs in stateful mode, it verifies the
+/// re-calculated execution witness strictly matches the test execution witness, and also runs the test
+/// in stateless mode. Note that `only_stateless` set to true is required when running tests which
+/// checks the stateless block validation soundness (e.g., if a test provides an invalid execution witness
+/// expecting the run to fail).
+///
 /// Returns:
 /// - `Ok(())` if all blocks execute successfully and the final state is correct.
 /// - `Err(Error)` if any block fails to execute correctly, or if the post-state validation fails.
 fn run_case(case: &BlockchainTest, only_stateless: bool) -> Result<(), Error> {
-    // Create a new test database and initialize a provider for the test case.
     let chain_spec: Arc<ChainSpec> = Arc::new(case.network.into());
-    // Decode blocks
     let blocks = decode_blocks(&case.blocks)?;
 
     let execution_witnesses = if only_stateless {
+        // If we only run statelessly, we use the provided test execution witness for the run.
         case.blocks.iter().map(|b| b.execution_witness.clone().unwrap()).collect::<Vec<_>>()
     } else {
+        // Otherwise, we run the test as usual (i.e., stateful mode).
         let exec_witnesses = run_stateful(
             chain_spec.clone(),
             &case.genesis_block_header,
@@ -205,16 +212,18 @@ fn run_case(case: &BlockchainTest, only_stateless: bool) -> Result<(), Error> {
             &case.post_state,
             &blocks,
         )?;
+        // Verify that the stateful mode generated execution witness matches the expected one in the test.
         for (idx, block) in case.blocks.iter().enumerate() {
             if let Some(want_exec_witness) = block.execution_witness.as_ref() {
-                assert_execution_witness(&exec_witnesses[idx], want_exec_witness)
+                assert_execution_witness_eq(&exec_witnesses[idx], want_exec_witness)
                     .map_err(|err| Error::block_failed(blocks[idx].number, err))?;
             }
         }
+        // Since both re-generated and provided execution witness match, we can use any for the stateless execution.
         exec_witnesses
     };
 
-    // Now validate using the stateless client if everything else passes
+    // Run the test statelessly.
     for (block, execution_witness) in blocks.into_iter().zip(execution_witnesses) {
         stateless_validation(
             block,
@@ -377,9 +386,17 @@ fn run_stateful(
     Ok(exec_witnesses)
 }
 
-fn assert_execution_witness(have: &ExecutionWitness, want: &ExecutionWitness) -> Result<(), Error> {
+/// Asserts that two execution witnesses are equal.
+fn assert_execution_witness_eq(
+    have: &ExecutionWitness,
+    want: &ExecutionWitness,
+) -> Result<(), Error> {
     let mut have = have.clone();
     let mut want = want.clone();
+
+    // The execution witness isn't a consensus field, thus for the comparison:
+    // - We expect them to have exactly the same information.
+    // - The comparison is relaxed regarding order (e.g., `state` mpt nodes can be provided in any order)
     have.state.sort();
     want.state.sort();
     have.codes.sort();
@@ -503,20 +520,33 @@ fn path_contains(path_str: &str, rhs: &[&str]) -> bool {
     path_str.contains(&rhs)
 }
 
-fn sort_execution_witness_keys(flat_list: Vec<Bytes>) -> Result<Vec<Bytes>, Error> {
-    let mut gouped_keys: BTreeMap<Bytes, Vec<Bytes>> = BTreeMap::new();
+/// Sort execution witness `keys` field by address and storage slots.
+fn sort_execution_witness_keys(keys: Vec<Bytes>) -> Result<Vec<Bytes>, Error> {
+    // The format of this field is:
+    //  <address-1>
+    //  <address-1-storage-slot-A>
+    //  <address-1-storage-slot-B>
+    //  <address-2>
+    //  <address-3>
+    //  <address-4>
+    //  <address-4-storage-slot-A>
+    //  <address-4-storage-slot-B>
+    //  ...
+    // We group by address first in a BTreeMap (i.e., sorted), and later sort storage slots.
+    let mut addresses: BTreeMap<Bytes, Vec<Bytes>> = BTreeMap::new();
     let mut curr_address: Option<Bytes> = None;
 
-    for key in flat_list {
+    for key in keys {
         match key.len() {
             20 => {
                 curr_address = Some(key.clone());
-                gouped_keys.entry(key).or_default();
+                addresses.entry(key).or_default();
             }
             32 => {
                 if let Some(ref address) = curr_address {
-                    gouped_keys.get_mut(address).unwrap().push(key);
+                    addresses.get_mut(address).unwrap().push(key);
                 } else {
+                    // This must never happen since a storage slot was provided without a previously seen address.
                     return Err(Error::Assertion(
                         "Expected a parent key (20 bytes) before a child key (32 bytes)"
                             .to_string(),
@@ -527,15 +557,15 @@ fn sort_execution_witness_keys(flat_list: Vec<Bytes>) -> Result<Vec<Bytes>, Erro
         }
     }
 
-    for children in gouped_keys.values_mut() {
-        children.sort();
+    for storage_slots in addresses.values_mut() {
+        storage_slots.sort();
     }
 
-    let mut sorted_list: Vec<Bytes> = Vec::new();
-    for (parent_key, children) in gouped_keys {
-        sorted_list.push(parent_key);
-        sorted_list.extend(children);
+    let mut sorted_keys: Vec<Bytes> = Vec::new();
+    for (address, storage_slots) in addresses {
+        sorted_keys.push(address);
+        sorted_keys.extend(storage_slots);
     }
 
-    Ok(sorted_list)
+    Ok(sorted_keys)
 }
