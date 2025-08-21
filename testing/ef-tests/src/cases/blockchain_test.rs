@@ -358,18 +358,25 @@ fn run_stateful(
         parent = block.clone()
     }
 
-    // Validate the post-state for the test case.
-    //
-    // If we get here then it means that the post-state root checks
-    // made after we execute each block was successful.
-    //
-    // If an error occurs here, then it is:
-    // - Either an issue with the test setup
-    // - Possibly an error in the test case where the post-state root in the last block does not
-    //   match the post-state values.
-    let expected_post_state = post_state.as_ref().ok_or(Error::MissingPostState)?;
-    for (&address, account) in expected_post_state {
-        account.assert_db(address, provider.tx_ref())?;
+    match post_state {
+        Some(expected_post_state) => {
+            // Validate the post-state for the test case.
+            //
+            // If we get here then it means that the post-state root checks
+            // made after we execute each block was successful.
+            //
+            // If an error occurs here, then it is:
+            // - Either an issue with the test setup
+            // - Possibly an error in the test case where the post-state root in the last block does not
+            //   match the post-state values.
+            for (&address, account) in expected_post_state {
+                account.assert_db(address, provider.tx_ref())?;
+            }
+        }
+        None => {
+            // Some test may not have post-state (e.g., state-heavy benchmark tests).
+            // In this case, we can skip the post-state validation.
+        }
     }
 
     Ok(exec_witnesses)
