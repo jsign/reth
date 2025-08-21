@@ -1,10 +1,10 @@
 //! Test runners for `BlockchainTests` in <https://github.com/ethereum/tests>
 
 use crate::{
-    models::{BlockchainTest, ForkSpec},
+    models::{self, Account, BlockchainTest, ForkSpec, Header},
     Case, Error, Suite,
 };
-use alloy_primitives::Bytes;
+use alloy_primitives::{Address, Bytes};
 use alloy_rlp::{Decodable, Encodable};
 use rayon::iter::{ParallelBridge, ParallelIterator};
 use reth_chainspec::ChainSpec;
@@ -105,7 +105,7 @@ impl BlockchainTestCase {
     /// expectations encoded in the JSON file.
     fn run_single_case(name: &str, case: &BlockchainTest) -> Result<(), Error> {
         let expectation = Self::expected_failure(case);
-        match run_case(case) {
+        match run_case(case, false) {
             // All blocks executed successfully.
             Ok(()) => {
                 // Check if the test case specifies that it should have failed
@@ -194,15 +194,58 @@ impl Case for BlockchainTestCase {
 /// Returns:
 /// - `Ok(())` if all blocks execute successfully and the final state is correct.
 /// - `Err(Error)` if any block fails to execute correctly, or if the post-state validation fails.
-fn run_case(case: &BlockchainTest) -> Result<(), Error> {
+fn run_case(case: &BlockchainTest, only_stateless: bool) -> Result<(), Error> {
     // Create a new test database and initialize a provider for the test case.
     let chain_spec: Arc<ChainSpec> = Arc::new(case.network.into());
+    // Decode blocks
+    let blocks = decode_blocks(&case.blocks)?;
+
+    let execution_witnesses = if only_stateless {
+        case.blocks.iter().map(|b| b.execution_witness.clone().unwrap()).collect::<Vec<_>>()
+    } else {
+        let exec_witnesses = run_stateful(
+            chain_spec.clone(),
+            &case.genesis_block_header,
+            &case.pre,
+            &case.post_state,
+            &blocks,
+        )?;
+        for (idx, block) in case.blocks.iter().enumerate() {
+            if let Some(want_exec_witness) = block.execution_witness.as_ref() {
+                assert_execution_witness(&exec_witnesses[idx], want_exec_witness)
+                    .map_err(|err| Error::block_failed(blocks[idx].number, err))?;
+            }
+        }
+        exec_witnesses
+    };
+
+    // Now validate using the stateless client if everything else passes
+    for (block, execution_witness) in blocks.into_iter().zip(execution_witnesses) {
+        stateless_validation(
+            block,
+            execution_witness,
+            chain_spec.clone(),
+            EthEvmConfig::new(chain_spec.clone()),
+        )
+        .expect("stateless validation failed");
+    }
+
+    Ok(())
+}
+
+fn run_stateful(
+    chain_spec: Arc<ChainSpec>,
+    genesis_block_header: &Header,
+    pre: &models::State,
+    post_state: &Option<BTreeMap<Address, Account>>,
+    blocks: &[RecoveredBlock<Block>],
+) -> Result<Vec<ExecutionWitness>, Error> {
     let factory = create_test_provider_factory_with_chain_spec(chain_spec.clone());
     let provider = factory.database_provider_rw().unwrap();
 
     // Insert initial test state into the provider.
     let genesis_block = SealedBlock::<Block>::from_sealed_parts(
-        case.genesis_block_header.clone().into(),
+        genesis_block_header.clone().into(),
         Default::default(),
     )
     .try_recover()
@@ -212,7 +255,7 @@ fn run_case(case: &BlockchainTest) -> Result<(), Error> {
         .insert_block(genesis_block.clone(), StorageLocation::Database)
         .map_err(|err| Error::block_failed(0, err))?;
 
-    let genesis_state = case.pre.clone().into_genesis_state();
+    let genesis_state = pre.clone().into_genesis_state();
     insert_genesis_state(&provider, genesis_state.iter())
         .map_err(|err| Error::block_failed(0, err))?;
     insert_genesis_hashes(&provider, genesis_state.iter())
@@ -220,12 +263,10 @@ fn run_case(case: &BlockchainTest) -> Result<(), Error> {
     insert_genesis_history(&provider, genesis_state.iter())
         .map_err(|err| Error::block_failed(0, err))?;
 
-    // Decode blocks
-    let blocks = decode_blocks(&case.blocks)?;
-
     let executor_provider = EthEvmConfig::ethereum(chain_spec.clone());
     let mut parent = genesis_block;
-    let mut program_inputs = Vec::new();
+
+    let mut exec_witnesses = Vec::new();
 
     for (block_index, block) in blocks.iter().enumerate() {
         // Note: same as the comment on `decode_blocks` as to why we cannot use block.number
@@ -282,12 +323,7 @@ fn run_case(case: &BlockchainTest) -> Result<(), Error> {
             })
             .collect();
 
-        if let Some(test_exec_witness) = case.blocks[block_index].execution_witness.as_ref() {
-            assert_execution_witness(&exec_witness, test_exec_witness)
-                .map_err(|err| Error::block_failed(block_number, err))?;
-        }
-
-        program_inputs.push((block.clone(), exec_witness));
+        exec_witnesses.push(exec_witness);
 
         // Compute and check the post state root
         let hashed_state =
@@ -331,23 +367,12 @@ fn run_case(case: &BlockchainTest) -> Result<(), Error> {
     // - Either an issue with the test setup
     // - Possibly an error in the test case where the post-state root in the last block does not
     //   match the post-state values.
-    let expected_post_state = case.post_state.as_ref().ok_or(Error::MissingPostState)?;
+    let expected_post_state = post_state.as_ref().ok_or(Error::MissingPostState)?;
     for (&address, account) in expected_post_state {
         account.assert_db(address, provider.tx_ref())?;
     }
 
-    // Now validate using the stateless client if everything else passes
-    for (block, execution_witness) in program_inputs {
-        stateless_validation(
-            block,
-            execution_witness,
-            chain_spec.clone(),
-            EthEvmConfig::new(chain_spec.clone()),
-        )
-        .expect("stateless validation failed");
-    }
-
-    Ok(())
+    Ok(exec_witnesses)
 }
 
 fn assert_execution_witness(have: &ExecutionWitness, want: &ExecutionWitness) -> Result<(), Error> {
