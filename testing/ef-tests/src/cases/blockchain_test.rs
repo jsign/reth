@@ -4,6 +4,7 @@ use crate::{
     models::{BlockchainTest, ForkSpec},
     Case, Error, Suite,
 };
+use alloy_primitives::Bytes;
 use alloy_rlp::{Decodable, Encodable};
 use rayon::iter::{ParallelBridge, ParallelIterator};
 use reth_chainspec::ChainSpec;
@@ -23,18 +24,24 @@ use reth_revm::{database::StateProviderDatabase, witness::ExecutionWitnessRecord
 use reth_stateless::{validation::stateless_validation, ExecutionWitness};
 use reth_trie::{HashedPostState, KeccakKeyHasher, StateRoot};
 use reth_trie_db::DatabaseStateRoot;
-use std::{collections::BTreeMap, fs, path::Path, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 /// A handler for the blockchain test suite.
 #[derive(Debug)]
 pub struct BlockchainTests {
-    suite: String,
+    suite_path: PathBuf,
+    suite_name: String,
 }
 
 impl BlockchainTests {
     /// Create a new handler for a subset of the blockchain test suite.
-    pub const fn new(suite: String) -> Self {
-        Self { suite }
+    pub const fn new(suite_path: PathBuf, suite_name: String) -> Self {
+        Self { suite_path, suite_name }
     }
 }
 
@@ -42,7 +49,11 @@ impl Suite for BlockchainTests {
     type Case = BlockchainTestCase;
 
     fn suite_name(&self) -> String {
-        format!("BlockchainTests/{}", self.suite)
+        self.suite_name.clone()
+    }
+
+    fn suite_base_path(&self) -> PathBuf {
+        self.suite_path.clone()
     }
 }
 
@@ -58,12 +69,12 @@ impl BlockchainTestCase {
     const fn excluded_fork(network: ForkSpec) -> bool {
         matches!(
             network,
-            ForkSpec::ByzantiumToConstantinopleAt5 |
-                ForkSpec::Constantinople |
-                ForkSpec::ConstantinopleFix |
-                ForkSpec::MergeEOF |
-                ForkSpec::MergeMeterInitCode |
-                ForkSpec::MergePush0
+            ForkSpec::ByzantiumToConstantinopleAt5
+                | ForkSpec::Constantinople
+                | ForkSpec::ConstantinopleFix
+                | ForkSpec::MergeEOF
+                | ForkSpec::MergeMeterInitCode
+                | ForkSpec::MergePush0
         )
     }
 
@@ -157,7 +168,7 @@ impl Case for BlockchainTestCase {
     fn run(&self) -> Result<(), Error> {
         // If the test is marked for skipping, return a Skipped error immediately.
         if self.skip {
-            return Err(Error::Skipped)
+            return Err(Error::Skipped);
         }
 
         // Iterate through test cases, filtering by the network type to exclude specific forks.
@@ -271,6 +282,11 @@ fn run_case(case: &BlockchainTest) -> Result<(), Error> {
             })
             .collect();
 
+        if let Some(test_exec_witness) = case.blocks[block_index].execution_witness.as_ref() {
+            assert_execution_witness(&exec_witness, test_exec_witness)
+                .map_err(|err| Error::block_failed(block_number, err))?;
+        }
+
         program_inputs.push((block.clone(), exec_witness));
 
         // Compute and check the post state root
@@ -283,7 +299,7 @@ fn run_case(case: &BlockchainTest) -> Result<(), Error> {
             return Err(Error::block_failed(
                 block_number,
                 Error::Assertion("state root mismatch".to_string()),
-            ))
+            ));
         }
 
         // Commit the post state/state diff to the database
@@ -331,6 +347,23 @@ fn run_case(case: &BlockchainTest) -> Result<(), Error> {
         .expect("stateless validation failed");
     }
 
+    Ok(())
+}
+
+fn assert_execution_witness(have: &ExecutionWitness, want: &ExecutionWitness) -> Result<(), Error> {
+    let mut have = have.clone();
+    let mut want = want.clone();
+    have.state.sort();
+    want.state.sort();
+    have.codes.sort();
+    want.codes.sort();
+    have.keys = sort_execution_witness_keys(have.keys)?;
+    want.keys = sort_execution_witness_keys(want.keys)?;
+    have.headers.sort();
+    want.headers.sort();
+    if have != want {
+        return Err(Error::Assertion("execution witness mismatch".to_string()));
+    }
     Ok(())
 }
 
@@ -441,4 +474,41 @@ pub fn should_skip(path: &Path) -> bool {
 fn path_contains(path_str: &str, rhs: &[&str]) -> bool {
     let rhs = rhs.join(std::path::MAIN_SEPARATOR_STR);
     path_str.contains(&rhs)
+}
+
+fn sort_execution_witness_keys(flat_list: Vec<Bytes>) -> Result<Vec<Bytes>, Error> {
+    let mut gouped_keys: BTreeMap<Bytes, Vec<Bytes>> = BTreeMap::new();
+    let mut curr_address: Option<Bytes> = None;
+
+    for key in flat_list {
+        match key.len() {
+            20 => {
+                curr_address = Some(key.clone());
+                gouped_keys.entry(key).or_default();
+            }
+            32 => {
+                if let Some(ref address) = curr_address {
+                    gouped_keys.get_mut(address).unwrap().push(key);
+                } else {
+                    return Err(Error::Assertion(
+                        "Expected a parent key (20 bytes) before a child key (32 bytes)"
+                            .to_string(),
+                    ));
+                }
+            }
+            _ => return Err(Error::Assertion("Unexpected key length".to_string())),
+        }
+    }
+
+    for children in gouped_keys.values_mut() {
+        children.sort();
+    }
+
+    let mut sorted_list: Vec<Bytes> = Vec::new();
+    for (parent_key, children) in gouped_keys {
+        sorted_list.push(parent_key);
+        sorted_list.extend(children);
+    }
+
+    Ok(sorted_list)
 }

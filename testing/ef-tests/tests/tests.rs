@@ -2,13 +2,19 @@
 #![cfg(feature = "ef-tests")]
 
 use ef_tests::{cases::blockchain_test::BlockchainTests, suite::Suite};
+use std::path::PathBuf;
 
 macro_rules! general_state_test {
     ($test_name:ident, $dir:ident) => {
         #[test]
         fn $test_name() {
             reth_tracing::init_test_tracing();
-            BlockchainTests::new(format!("GeneralStateTests/{}", stringify!($dir))).run();
+            let suite_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("ethereum-tests")
+                .join("BlockchainTests");
+
+            BlockchainTests::new(suite_path, format!("GeneralStateTests/{}", stringify!($dir)))
+                .run();
         }
     };
 }
@@ -83,7 +89,11 @@ macro_rules! blockchain_test {
         #[test]
         fn $test_name() {
             reth_tracing::init_test_tracing();
-            BlockchainTests::new(format!("{}", stringify!($dir))).run();
+            let suite_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("ethereum-tests")
+                .join("BlockchainTests");
+
+            BlockchainTests::new(suite_path, format!("{}", stringify!($dir))).run();
         }
     };
 }
