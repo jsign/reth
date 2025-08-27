@@ -5,7 +5,7 @@ use alloy_consensus::Header as RethHeader;
 use alloy_eips::eip4895::Withdrawals;
 use alloy_genesis::GenesisAccount;
 use alloy_primitives::{keccak256, Address, Bloom, Bytes, B256, B64, U256};
-use reth_chainspec::{ChainSpec, ChainSpecBuilder};
+use reth_chainspec::{ChainSpec, ChainSpecBuilder, EthereumHardfork, ForkCondition};
 use reth_db_api::{cursor::DbDupCursorRO, tables, transaction::DbTx};
 use reth_primitives_traits::SealedHeader;
 use serde::Deserialize;
@@ -243,12 +243,12 @@ impl Account {
                 } else {
                     return Err(Error::Assertion(format!(
                         "Slot {slot:?} is missing from the database. Expected {value:?}"
-                    )))
+                    )));
                 }
             } else {
                 return Err(Error::Assertion(format!(
                     "Slot {slot:?} is missing from the database. Expected {value:?}"
-                )))
+                )));
             }
         }
 
@@ -308,6 +308,8 @@ pub enum ForkSpec {
     MergePush0,
     /// Cancun
     Cancun,
+    /// Cancun to Prague at timestamp 15k
+    CancunToPragueAtTime15k,
     /// Prague
     Prague,
 }
@@ -325,19 +327,22 @@ impl From<ForkSpec> for ChainSpec {
                 spec_builder.tangerine_whistle_activated()
             }
             ForkSpec::EIP158 => spec_builder.spurious_dragon_activated(),
-            ForkSpec::Byzantium |
-            ForkSpec::EIP158ToByzantiumAt5 |
-            ForkSpec::ConstantinopleFix |
-            ForkSpec::ByzantiumToConstantinopleFixAt5 => spec_builder.byzantium_activated(),
+            ForkSpec::Byzantium
+            | ForkSpec::EIP158ToByzantiumAt5
+            | ForkSpec::ConstantinopleFix
+            | ForkSpec::ByzantiumToConstantinopleFixAt5 => spec_builder.byzantium_activated(),
             ForkSpec::Istanbul => spec_builder.istanbul_activated(),
             ForkSpec::Berlin => spec_builder.berlin_activated(),
             ForkSpec::London | ForkSpec::BerlinToLondonAt5 => spec_builder.london_activated(),
-            ForkSpec::Merge |
-            ForkSpec::MergeEOF |
-            ForkSpec::MergeMeterInitCode |
-            ForkSpec::MergePush0 => spec_builder.paris_activated(),
+            ForkSpec::Merge
+            | ForkSpec::MergeEOF
+            | ForkSpec::MergeMeterInitCode
+            | ForkSpec::MergePush0 => spec_builder.paris_activated(),
             ForkSpec::Shanghai => spec_builder.shanghai_activated(),
             ForkSpec::Cancun => spec_builder.cancun_activated(),
+            ForkSpec::CancunToPragueAtTime15k => spec_builder
+                .cancun_activated()
+                .with_fork(EthereumHardfork::Prague, ForkCondition::Timestamp(15_000)),
             ForkSpec::ByzantiumToConstantinopleAt5 | ForkSpec::Constantinople => {
                 panic!("Overridden with PETERSBURG")
             }
