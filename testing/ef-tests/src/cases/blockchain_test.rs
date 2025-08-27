@@ -202,7 +202,10 @@ fn run_case(case: &BlockchainTest, only_stateless: bool) -> Result<(), Error> {
 
     let execution_witnesses = if only_stateless {
         // If we only run statelessly, we use the provided test execution witness for the run.
-        case.blocks.iter().map(|b| b.execution_witness.clone().unwrap()).collect::<Vec<_>>()
+        case.blocks
+            .iter()
+            .map(|b| b.execution_witness.clone().unwrap_or_default())
+            .collect::<Vec<_>>()
     } else {
         // Otherwise, we run the test as usual (i.e., stateful mode).
         let exec_witnesses = run_stateful(
