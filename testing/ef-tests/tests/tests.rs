@@ -100,3 +100,26 @@ macro_rules! blockchain_test {
 
 blockchain_test!(valid_blocks, ValidBlocks);
 blockchain_test!(invalid_blocks, InvalidBlocks);
+
+macro_rules! eest_blockchain_test {
+    ($test_name:ident, $dir:ident) => {
+        #[test]
+        fn $test_name() {
+            reth_tracing::init_test_tracing();
+            let suite_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("execution-spec-tests")
+                .join("blockchain_tests");
+
+            BlockchainTests::new(suite_path).run_only(&format!("{}", stringify!($dir)));
+        }
+    };
+}
+eest_blockchain_test!(berlin, berlin);
+eest_blockchain_test!(byzantium, byzantium);
+eest_blockchain_test!(cancun, cancun);
+eest_blockchain_test!(constantinople, constantinople);
+eest_blockchain_test!(frontier, frontier);
+eest_blockchain_test!(homestead, homestead);
+eest_blockchain_test!(istanbul, istanbul);
+eest_blockchain_test!(paris, paris);
+eest_blockchain_test!(shanghai, shanghai);

@@ -297,9 +297,14 @@ pub enum ForkSpec {
     /// London
     London,
     /// Paris aka The Merge
+    #[serde(alias = "Paris")]
     Merge,
+    /// Paris to Shanghai at time 15k
+    ParisToShanghaiAtTime15k,
     /// Shanghai
     Shanghai,
+    /// Shanghai to Cancun at time 15k
+    ShanghaiToCancunAtTime15k,
     /// Merge EOF test
     #[serde(alias = "Merge+3540+3670")]
     MergeEOF,
@@ -319,7 +324,7 @@ pub enum ForkSpec {
 
 impl From<ForkSpec> for ChainSpec {
     fn from(fork_spec: ForkSpec) -> Self {
-        let spec_builder = ChainSpecBuilder::mainnet();
+        let spec_builder = ChainSpecBuilder::mainnet().clean_hardforks();
 
         match fork_spec {
             ForkSpec::Frontier => spec_builder.frontier_activated(),
@@ -341,7 +346,13 @@ impl From<ForkSpec> for ChainSpec {
             | ForkSpec::MergeEOF
             | ForkSpec::MergeMeterInitCode
             | ForkSpec::MergePush0 => spec_builder.paris_activated(),
+            ForkSpec::ParisToShanghaiAtTime15k => spec_builder
+                .paris_activated()
+                .with_fork(EthereumHardfork::Shanghai, ForkCondition::Timestamp(15_000)),
             ForkSpec::Shanghai => spec_builder.shanghai_activated(),
+            ForkSpec::ShanghaiToCancunAtTime15k => spec_builder
+                .shanghai_activated()
+                .with_fork(EthereumHardfork::Cancun, ForkCondition::Timestamp(15_000)),
             ForkSpec::Cancun => spec_builder.cancun_activated(),
             ForkSpec::CancunToPragueAtTime15k => spec_builder
                 .cancun_activated()
