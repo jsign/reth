@@ -101,8 +101,8 @@ impl StatelessSparseTrie {
             // ...check that its storage is either empty or the storage trie was sufficiently
             // revealed...
             let account = TrieAccount::decode(&mut bytes.as_slice())?;
-            if account.storage_root != EMPTY_ROOT_HASH
-                && !self.inner.check_valid_storage_witness(hashed_address, hashed_slot)
+            if account.storage_root != EMPTY_ROOT_HASH &&
+                !self.inner.check_valid_storage_witness(hashed_address, hashed_slot)
             {
                 return Err(ProviderError::TrieWitnessError(format!(
                     "incomplete storage witness: prover must supply exclusion proof for slot {hashed_slot:?} in account {hashed_address:?}"

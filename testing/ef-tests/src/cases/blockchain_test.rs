@@ -1,10 +1,9 @@
 //! Test runners for `BlockchainTests` in <https://github.com/ethereum/tests>
 
 use crate::{
-    models::{self, Account, BlockchainTest, ForkSpec, Header},
+    models::{BlockchainTest, ForkSpec},
     Case, Error, Suite,
 };
-use alloy_primitives::Address;
 use alloy_rlp::{Decodable, Encodable};
 use rayon::iter::{ParallelBridge, ParallelIterator};
 use reth_chainspec::ChainSpec;
@@ -64,12 +63,12 @@ impl BlockchainTestCase {
     const fn excluded_fork(network: ForkSpec) -> bool {
         matches!(
             network,
-            ForkSpec::ByzantiumToConstantinopleAt5
-                | ForkSpec::Constantinople
-                | ForkSpec::ConstantinopleFix
-                | ForkSpec::MergeEOF
-                | ForkSpec::MergeMeterInitCode
-                | ForkSpec::MergePush0
+            ForkSpec::ByzantiumToConstantinopleAt5 |
+                ForkSpec::Constantinople |
+                ForkSpec::ConstantinopleFix |
+                ForkSpec::MergeEOF |
+                ForkSpec::MergeMeterInitCode |
+                ForkSpec::MergePush0
         )
     }
 
@@ -128,7 +127,7 @@ impl BlockchainTestCase {
                 ))),
 
                 // No failure expected at all - bubble up original error.
-                None => { println!("nameeeeeeeeeeeeeeeee: {}", name); err },
+                None => err,
             },
 
             // Non‑processing error – forward as‑is.
@@ -190,45 +189,14 @@ impl Case for BlockchainTestCase {
 /// - `Ok(())` if all blocks execute successfully and the final state is correct.
 /// - `Err(Error)` if any block fails to execute correctly, or if the post-state validation fails.
 fn run_case(case: &BlockchainTest) -> Result<(), Error> {
+    // Create a new test database and initialize a provider for the test case.
     let chain_spec: Arc<ChainSpec> = Arc::new(case.network.into());
-    let blocks = decode_blocks(&case.blocks)?;
-
-    let execution_witnesses = run_stateful(
-        chain_spec.clone(),
-        &case.genesis_block_header,
-        &case.pre,
-        &case.post_state,
-        &blocks,
-    )?;
-
-    // Run the test statelessly.
-    for (block, execution_witness) in blocks.into_iter().zip(execution_witnesses) {
-        let block_num = block.number;
-        stateless_validation(
-            block,
-            execution_witness,
-            chain_spec.clone(),
-            EthEvmConfig::new(chain_spec.clone()),
-        )
-        .map_err(|err| Error::block_failed(block_num, err))?;
-    }
-
-    Ok(())
-}
-
-fn run_stateful(
-    chain_spec: Arc<ChainSpec>,
-    genesis_block_header: &Header,
-    pre: &models::State,
-    post_state: &Option<BTreeMap<Address, Account>>,
-    blocks: &[RecoveredBlock<Block>],
-) -> Result<Vec<ExecutionWitness>, Error> {
     let factory = create_test_provider_factory_with_chain_spec(chain_spec.clone());
     let provider = factory.database_provider_rw().unwrap();
 
     // Insert initial test state into the provider.
     let genesis_block = SealedBlock::<Block>::from_sealed_parts(
-        genesis_block_header.clone().into(),
+        case.genesis_block_header.clone().into(),
         Default::default(),
     )
     .try_recover()
@@ -238,13 +206,16 @@ fn run_stateful(
         .insert_block(genesis_block.clone(), StorageLocation::Database)
         .map_err(|err| Error::block_failed(0, err))?;
 
-    let genesis_state = pre.clone().into_genesis_state();
+    let genesis_state = case.pre.clone().into_genesis_state();
     insert_genesis_state(&provider, genesis_state.iter())
         .map_err(|err| Error::block_failed(0, err))?;
     insert_genesis_hashes(&provider, genesis_state.iter())
         .map_err(|err| Error::block_failed(0, err))?;
     insert_genesis_history(&provider, genesis_state.iter())
         .map_err(|err| Error::block_failed(0, err))?;
+
+    // Decode blocks
+    let blocks = decode_blocks(&case.blocks)?;
 
     let executor_provider = EthEvmConfig::ethereum(chain_spec.clone());
     let mut parent = genesis_block;
@@ -305,7 +276,7 @@ fn run_stateful(
             })
             .collect();
 
-        program_inputs.push(exec_witness);
+        program_inputs.push((block.clone(), exec_witness));
 
         // Compute and check the post state root
         let hashed_state =
@@ -340,7 +311,7 @@ fn run_stateful(
         parent = block.clone()
     }
 
-    match post_state {
+    match &case.post_state {
         Some(expected_post_state) => {
             // Validate the post-state for the test case.
             //
@@ -349,10 +320,10 @@ fn run_stateful(
             //
             // If an error occurs here, then it is:
             // - Either an issue with the test setup
-            // - Possibly an error in the test case where the post-state root in the last block does not
-            //   match the post-state values.
-            for (&address, account) in expected_post_state {
-                account.assert_db(address, provider.tx_ref())?;
+            // - Possibly an error in the test case where the post-state root in the last block does
+            //   not match the post-state values.
+            for (address, account) in expected_post_state {
+                account.assert_db(*address, provider.tx_ref())?;
             }
         }
         None => {
@@ -361,7 +332,18 @@ fn run_stateful(
         }
     }
 
-    Ok(program_inputs)
+    // Now validate using the stateless client if everything else passes
+    for (block, execution_witness) in program_inputs {
+        stateless_validation(
+            block,
+            execution_witness,
+            chain_spec.clone(),
+            EthEvmConfig::new(chain_spec.clone()),
+        )
+        .expect("stateless validation failed");
+    }
+
+    Ok(())
 }
 
 fn decode_blocks(
