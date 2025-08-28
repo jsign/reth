@@ -228,13 +228,14 @@ fn run_case(case: &BlockchainTest, only_stateless: bool) -> Result<(), Error> {
 
     // Run the test statelessly.
     for (block, execution_witness) in blocks.into_iter().zip(execution_witnesses) {
+        let block_num = block.number;
         stateless_validation(
             block,
             execution_witness,
             chain_spec.clone(),
             EthEvmConfig::new(chain_spec.clone()),
         )
-        .expect("stateless validation failed");
+        .map_err(|err| Error::block_failed(block_num, err))?;
     }
 
     Ok(())
