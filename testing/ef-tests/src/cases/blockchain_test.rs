@@ -4,7 +4,7 @@ use crate::{
     models::{self, Account, BlockchainTest, ForkSpec, Header},
     Case, Error, Suite,
 };
-use alloy_primitives::{Address, Bytes};
+use alloy_primitives::Address;
 use alloy_rlp::{Decodable, Encodable};
 use rayon::iter::{ParallelBridge, ParallelIterator};
 use reth_chainspec::ChainSpec;
@@ -100,7 +100,7 @@ impl BlockchainTestCase {
     /// expectations encoded in the JSON file.
     fn run_single_case(name: &str, case: &BlockchainTest) -> Result<(), Error> {
         let expectation = Self::expected_failure(case);
-        match run_case(case, false) {
+        match run_case(case) {
             // All blocks executed successfully.
             Ok(()) => {
                 // Check if the test case specifies that it should have failed
@@ -128,7 +128,7 @@ impl BlockchainTestCase {
                 ))),
 
                 // No failure expected at all - bubble up original error.
-                None => err,
+                None => { println!("name: {}", name); err },
             },
 
             // Non‑processing error – forward as‑is.
@@ -186,45 +186,20 @@ impl Case for BlockchainTestCase {
 /// - It then verifies that the resulting blockchain state (post-state) matches the expected
 ///   outcome.
 ///
-/// If is called with `only_stateless` set to true, it will only run the test in stateless mode
-/// using the provided test execution witness. Otherwise, it runs in stateful mode, it verifies the
-/// re-calculated execution witness strictly matches the test execution witness, and also runs the test
-/// in stateless mode. Note that `only_stateless` set to true is required when running tests which
-/// checks the stateless block validation soundness (e.g., if a test provides an invalid execution witness
-/// expecting the run to fail).
-///
 /// Returns:
 /// - `Ok(())` if all blocks execute successfully and the final state is correct.
 /// - `Err(Error)` if any block fails to execute correctly, or if the post-state validation fails.
-fn run_case(case: &BlockchainTest, only_stateless: bool) -> Result<(), Error> {
+fn run_case(case: &BlockchainTest) -> Result<(), Error> {
     let chain_spec: Arc<ChainSpec> = Arc::new(case.network.into());
     let blocks = decode_blocks(&case.blocks)?;
 
-    let execution_witnesses = if only_stateless {
-        // If we only run statelessly, we use the provided test execution witness for the run.
-        case.blocks
-            .iter()
-            .map(|b| b.execution_witness.clone().unwrap_or_default())
-            .collect::<Vec<_>>()
-    } else {
-        // Otherwise, we run the test as usual (i.e., stateful mode).
-        let exec_witnesses = run_stateful(
-            chain_spec.clone(),
-            &case.genesis_block_header,
-            &case.pre,
-            &case.post_state,
-            &blocks,
-        )?;
-        // Verify that the stateful mode generated execution witness matches the expected one in the test.
-        for (idx, block) in case.blocks.iter().enumerate() {
-            if let Some(want_exec_witness) = block.execution_witness.as_ref() {
-                assert_execution_witness_eq(&exec_witnesses[idx], want_exec_witness)
-                    .map_err(|err| Error::block_failed(blocks[idx].number, err))?;
-            }
-        }
-        // Since both re-generated and provided execution witness match, we can use any for the stateless execution.
-        exec_witnesses
-    };
+    let execution_witnesses = run_stateful(
+        chain_spec.clone(),
+        &case.genesis_block_header,
+        &case.pre,
+        &case.post_state,
+        &blocks,
+    )?;
 
     // Run the test statelessly.
     for (block, execution_witness) in blocks.into_iter().zip(execution_witnesses) {
@@ -273,8 +248,7 @@ fn run_stateful(
 
     let executor_provider = EthEvmConfig::ethereum(chain_spec.clone());
     let mut parent = genesis_block;
-
-    let mut exec_witnesses = Vec::new();
+    let mut program_inputs = Vec::new();
 
     for (block_index, block) in blocks.iter().enumerate() {
         // Note: same as the comment on `decode_blocks` as to why we cannot use block.number
@@ -331,7 +305,7 @@ fn run_stateful(
             })
             .collect();
 
-        exec_witnesses.push(exec_witness);
+        program_inputs.push(exec_witness);
 
         // Compute and check the post state root
         let hashed_state =
@@ -387,32 +361,7 @@ fn run_stateful(
         }
     }
 
-    Ok(exec_witnesses)
-}
-
-/// Asserts that two execution witnesses are equal.
-fn assert_execution_witness_eq(
-    have: &ExecutionWitness,
-    want: &ExecutionWitness,
-) -> Result<(), Error> {
-    let mut have = have.clone();
-    let mut want = want.clone();
-
-    // The execution witness isn't a consensus field, thus for the comparison:
-    // - We expect them to have exactly the same information.
-    // - The comparison is relaxed regarding order (e.g., `state` mpt nodes can be provided in any order)
-    have.state.sort();
-    want.state.sort();
-    have.codes.sort();
-    want.codes.sort();
-    have.keys = sort_execution_witness_keys(have.keys)?;
-    want.keys = sort_execution_witness_keys(want.keys)?;
-    have.headers.sort();
-    want.headers.sort();
-    if have != want {
-        return Err(Error::Assertion("execution witness mismatch".to_string()));
-    }
-    Ok(())
+    Ok(program_inputs)
 }
 
 fn decode_blocks(
@@ -522,54 +471,4 @@ pub fn should_skip(path: &Path) -> bool {
 fn path_contains(path_str: &str, rhs: &[&str]) -> bool {
     let rhs = rhs.join(std::path::MAIN_SEPARATOR_STR);
     path_str.contains(&rhs)
-}
-
-/// Sort execution witness `keys` field by address and storage slots.
-fn sort_execution_witness_keys(keys: Vec<Bytes>) -> Result<Vec<Bytes>, Error> {
-    // The format of this field is:
-    //  <address-1>
-    //  <address-1-storage-slot-A>
-    //  <address-1-storage-slot-B>
-    //  <address-2>
-    //  <address-3>
-    //  <address-4>
-    //  <address-4-storage-slot-A>
-    //  <address-4-storage-slot-B>
-    //  ...
-    // We group by address first in a BTreeMap (i.e., sorted), and later sort storage slots.
-    let mut addresses: BTreeMap<Bytes, Vec<Bytes>> = BTreeMap::new();
-    let mut curr_address: Option<Bytes> = None;
-
-    for key in keys {
-        match key.len() {
-            20 => {
-                curr_address = Some(key.clone());
-                addresses.entry(key).or_default();
-            }
-            32 => {
-                if let Some(ref address) = curr_address {
-                    addresses.get_mut(address).unwrap().push(key);
-                } else {
-                    // This must never happen since a storage slot was provided without a previously seen address.
-                    return Err(Error::Assertion(
-                        "Expected a parent key (20 bytes) before a child key (32 bytes)"
-                            .to_string(),
-                    ));
-                }
-            }
-            _ => return Err(Error::Assertion("Unexpected key length".to_string())),
-        }
-    }
-
-    for storage_slots in addresses.values_mut() {
-        storage_slots.sort();
-    }
-
-    let mut sorted_keys: Vec<Bytes> = Vec::new();
-    for (address, storage_slots) in addresses {
-        sorted_keys.push(address);
-        sorted_keys.extend(storage_slots);
-    }
-
-    Ok(sorted_keys)
 }
