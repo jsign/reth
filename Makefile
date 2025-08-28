@@ -218,7 +218,7 @@ $(EEST_TESTS_DIR):
 
 .PHONY: ef-tests
 ef-tests: $(EF_TESTS_DIR) $(EEST_TESTS_DIR) ## Runs Legacy and EEST tests.
-	cargo nextest run -p ef-tests --release --features ef-tests --success-output=immediate
+	cargo nextest run -p ef-tests --release --features ef-tests
 
 ##@ reth-bench
 
