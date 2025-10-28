@@ -47,7 +47,7 @@ pub use recover_block::UncompressedPublicKey;
 #[doc(inline)]
 pub use trie::StatelessTrie;
 #[doc(inline)]
-pub use validation::stateless_validation_with_trie;
+pub use validation::{stateless_validation_with_flatdb, stateless_validation_with_trie};
 
 pub use alloy_genesis::Genesis;
 

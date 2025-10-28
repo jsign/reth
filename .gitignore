@@ -72,3 +72,5 @@ __pycache__/
 # direnv
 .envrc
 .direnv/
+
+reth_data

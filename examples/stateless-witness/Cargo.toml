@@ -1,0 +1,17 @@
+[package]
+name = "example-stateless-witness"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+reth-ethereum = { workspace = true, features = ["node"] }
+reth-stateless = { workspace = true, features = ["k256"] }
+reth-execution-types.workspace = true
+reth-storage-api.workspace = true
+
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+
+eyre.workspace = true

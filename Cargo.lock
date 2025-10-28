@@ -3698,6 +3698,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-stateless-witness"
+version = "0.0.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-rlp",
+ "eyre",
+ "reth-ethereum",
+ "reth-execution-types",
+ "reth-stateless",
+ "reth-storage-api",
+]
+
+[[package]]
 name = "example-txpool-tracing"
 version = "0.0.0"
 dependencies = [
