@@ -22,7 +22,7 @@ impl SerializeAs<Cache> for CacheBincode {
         use serde::Serialize;
         let cache_bincode = Self {
             accounts: source.accounts.clone(),
-            contracts: source.contracts.iter().map(|(k, v)| (*k, v.bytes())).collect(),
+            contracts: source.contracts.iter().map(|(k, v)| (*k, v.original_bytes())).collect(),
             block_hashes: source.block_hashes.clone(),
         };
         cache_bincode.serialize(serializer)
