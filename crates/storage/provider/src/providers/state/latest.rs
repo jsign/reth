@@ -151,12 +151,12 @@ impl<Provider: DBProvider + BlockHashReader + Sync> StateProofProvider
         for (code_hash, code) in &record.contracts {
             match code {
                 Some(bytecode) => {
-                    prestate.contracts.insert(*code_hash, bytecode.clone());
+                    prestate.contracts.insert(*code_hash, bytecode.original_bytes());
                 }
                 None => {
                     // Fetch code from provider if not present in record
                     if let Some(code) = self.bytecode_by_hash(code_hash)? {
-                        prestate.contracts.insert(*code_hash, code.0);
+                        prestate.contracts.insert(*code_hash, code.0.original_bytes());
                     }
                 }
             }
@@ -224,8 +224,8 @@ impl<Provider: DBProvider + BlockHashReader> StateProvider
         storage_key: StorageKey,
     ) -> ProviderResult<Option<StorageValue>> {
         let mut cursor = self.tx().cursor_dup_read::<tables::PlainStorageState>()?;
-        if let Some(entry) = cursor.seek_by_key_subkey(account, storage_key)? &&
-            entry.key == storage_key
+        if let Some(entry) = cursor.seek_by_key_subkey(account, storage_key)?
+            && entry.key == storage_key
         {
             return Ok(Some(entry.value));
         }

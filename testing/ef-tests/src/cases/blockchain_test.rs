@@ -76,12 +76,12 @@ impl BlockchainTestCase {
     const fn excluded_fork(network: ForkSpec) -> bool {
         matches!(
             network,
-            ForkSpec::ByzantiumToConstantinopleAt5 |
-                ForkSpec::Constantinople |
-                ForkSpec::ConstantinopleFix |
-                ForkSpec::MergeEOF |
-                ForkSpec::MergeMeterInitCode |
-                ForkSpec::MergePush0
+            ForkSpec::ByzantiumToConstantinopleAt5
+                | ForkSpec::Constantinople
+                | ForkSpec::ConstantinopleFix
+                | ForkSpec::MergeEOF
+                | ForkSpec::MergeMeterInitCode
+                | ForkSpec::MergePush0
         )
     }
 
@@ -325,7 +325,7 @@ fn run_case(
             .collect();
 
         let flat_prestate = state_provider.flat_witness(flat_witness_record).unwrap();
-        let block_hashes: HashMap<U256, B256> = exec_witness
+        let block_hashes: BTreeMap<U256, B256> = exec_witness
             .headers
             .iter()
             .zip(range)
@@ -428,7 +428,8 @@ fn run_case(
         stateless_validation_flatdb_storage_check::<StatelessSparseTrie>(
             block,
             execution_witnesses.trie.clone(),
-            execution_witnesses.flatdb.state.clone(),
+            execution_witnesses.flatdb.pre_state.clone(),
+            execution_witnesses.flatdb.block_hashes.clone(),
             flatdb_post_state,
         )
         .expect("stateless flatdb state check failed");
@@ -575,7 +576,7 @@ fn execution_witness_with_parent(parent: &RecoveredBlock<Block>) -> ExecutionWit
         ExecutionWitness { headers: vec![serialized_header.clone().into()], ..Default::default() };
     let flatdb_witness = FlatExecutionWitness::new(
         Default::default(),
-        HashMap::from_iter([(U256::from(parent.number), parent.hash())]),
+        BTreeMap::from_iter([(U256::from(parent.number), parent.hash())]),
         serialized_header.into(),
     );
     ExecutionWitnesses { trie: trie_witness, flatdb: flatdb_witness }

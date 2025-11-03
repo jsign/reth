@@ -8,13 +8,9 @@
 
 use core::error;
 
-pub mod bincode;
-
-use alloc::fmt;
-use alloy_primitives::{
-    map::{HashMap, HashSet},
-    Address, Bytes, StorageValue, B256, U256,
-};
+use alloc::collections::btree_map::BTreeMap;
+use alloc::{collections::btree_set::BTreeSet, fmt};
+use alloy_primitives::{Address, Bytes, StorageValue, B256, U256};
 use reth_execution_types::FlatPreState;
 use reth_revm::{
     db::{Cache, CacheDB, DBErrorMarker},
@@ -22,38 +18,26 @@ use reth_revm::{
     state::{AccountInfo, Bytecode},
     DatabaseRef,
 };
-use serde_with::serde_as;
 
 /// A flat execution witness containing the state and context needed for stateless block execution.
-#[serde_with::serde_as]
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct FlatExecutionWitness {
     /// The state required for executing the block.
-    #[serde_as(as = "bincode::CacheBincode")]
-    pub state: Cache,
+    pub pre_state: FlatPreState,
+    /// The block hashes required for executing the block.
+    pub block_hashes: BTreeMap<U256, B256>,
     /// The parent block header required for pre-execution validations.
     pub parent_header: Bytes,
-    /// The set of addresses that have been self-destructed in the execution.
-    pub destructed_addresses: HashSet<Address>,
 }
 
 impl FlatExecutionWitness {
     /// Creates a new flat execution witness from state components.
-    pub fn new(
+    pub const fn new(
         pre_state: FlatPreState,
-        block_hashes: HashMap<U256, B256>,
+        block_hashes: BTreeMap<U256, B256>,
         parent_header: Bytes,
     ) -> Self {
-        Self {
-            state: Cache {
-                accounts: pre_state.accounts,
-                contracts: pre_state.contracts,
-                block_hashes,
-                logs: Default::default(),
-            },
-            destructed_addresses: pre_state.destructed_addresses,
-            parent_header,
-        }
+        Self { pre_state, block_hashes, parent_header }
     }
 
     /// Creates a cached database from the witness state.
@@ -63,8 +47,18 @@ impl FlatExecutionWitness {
     // pub fn create_db(self) -> CacheDB<reth_revm::db::EmptyDB> {
     pub fn create_db(self) -> CacheDB<SelfDestructCompatibleFailingDB> {
         CacheDB {
-            cache: self.state,
-            db: SelfDestructCompatibleFailingDB::new(self.destructed_addresses),
+            cache: Cache {
+                accounts: self.pre_state.accounts.into_iter().collect(),
+                contracts: self
+                    .pre_state
+                    .contracts
+                    .into_iter()
+                    .map(|(k, v)| (k, Bytecode::new_raw(v)))
+                    .collect(),
+                block_hashes: self.block_hashes.into_iter().collect(),
+                logs: Default::default(),
+            },
+            db: SelfDestructCompatibleFailingDB::new(self.pre_state.destructed_addresses),
         }
     }
 }
@@ -85,12 +79,12 @@ impl FlatExecutionWitness {
 /// `StateDB` not tracking individual storage accesses of self-destructed accounts.
 #[derive(Debug, Clone)]
 pub struct SelfDestructCompatibleFailingDB {
-    destructed_addresses: HashSet<Address>,
+    destructed_addresses: BTreeSet<Address>,
 }
 
 impl SelfDestructCompatibleFailingDB {
     /// Creates a new instance with the given set of self-destructed addresses.
-    pub const fn new(destructed_addresses: HashSet<Address>) -> Self {
+    pub const fn new(destructed_addresses: BTreeSet<Address>) -> Self {
         Self { destructed_addresses }
     }
 }

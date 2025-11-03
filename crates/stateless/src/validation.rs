@@ -14,13 +14,14 @@ use alloc::{
     vec::Vec,
 };
 use alloy_consensus::{BlockHeader, Header};
-use alloy_primitives::{keccak256, Bytes, B256};
+use alloy_primitives::{keccak256, map::HashMap, Bytes, B256, U256};
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_consensus::{Consensus, HeaderValidator};
 use reth_errors::ConsensusError;
 use reth_ethereum_consensus::{validate_block_post_execution, EthBeaconConsensus};
 use reth_ethereum_primitives::{Block, EthPrimitives};
 use reth_evm::{execute::Executor, ConfigureEvm};
+use reth_execution_types::FlatPreState;
 use reth_primitives_traits::{RecoveredBlock, SealedBlock, SealedHeader};
 use reth_revm::{
     db::{AccountState, Cache},
@@ -337,7 +338,8 @@ where
 pub fn stateless_validation_flatdb_storage_check<T>(
     current_block: Block,
     trie_witness: ExecutionWitness,
-    flatdb_pre_state: Cache,
+    flatdb_pre_state: FlatPreState,
+    block_hashes: BTreeMap<U256, B256>,
     flatdb_post_state: HashedPostState,
 ) -> Result<B256, StatelessValidationError>
 where
@@ -349,7 +351,7 @@ where
 
     // Verify that the flatdb block hashes map was correctly constructed.
     track_cycles!("verify_flatdb_block_hashes", {
-        for (block_num, block_hash) in flatdb_pre_state.block_hashes {
+        for (block_num, block_hash) in block_hashes {
             let block_num = block_num.try_into().unwrap();
             match ancestor_hashes.get(&block_num) {
                 Some(expected_hash) if *expected_hash == block_hash => {}
@@ -367,7 +369,7 @@ where
     // Verify that the contract code hashed map was correctly constructed.
     track_cycles!("verify_flatdb_bytecodes", {
         for (expected_codehash, flatdb_code) in &flatdb_pre_state.contracts {
-            let got_codehash = keccak256(flatdb_code.original_bytes());
+            let got_codehash = keccak256(flatdb_code);
             if got_codehash != *expected_codehash {
                 return Err(StatelessValidationError::FlatdbBytecodeHashMismatch {
                     got: got_codehash,
