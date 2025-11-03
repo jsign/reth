@@ -4,20 +4,31 @@ use alloc::collections::{BTreeMap, BTreeSet};
 
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use revm::{
-    database::{AccountStatus, DbAccount, State},
-    primitives::{HashMap, HashSet},
-    state::Bytecode,
+    database::{AccountState, AccountStatus, State},
+    primitives::{HashMap, HashSet, StorageKey, StorageValue},
+    state::{AccountInfo, Bytecode},
 };
 
 /// Records pre-state data for witness generation.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct FlatPreState {
     /// Accounts accessed during execution.
-    pub accounts: BTreeMap<Address, DbAccount>,
+    pub accounts: BTreeMap<Address, Account>,
     /// Bytecode accessed during execution.
     pub contracts: BTreeMap<B256, Bytes>,
     /// The set of addresses that have been self-destructed in the execution.
     pub destructed_addresses: BTreeSet<Address>,
+}
+
+/// Represents an account in the pre-state.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct Account {
+    /// Basic account information.
+    pub info: AccountInfo,
+    /// If account is selfdestructed or newly created, storage will be cleared.
+    pub account_state: AccountState,
+    /// Storage slots
+    pub storage: BTreeMap<StorageKey, StorageValue>,
 }
 
 /// Records pre-state accesses that occurred during execution.

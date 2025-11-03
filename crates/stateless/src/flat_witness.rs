@@ -12,6 +12,7 @@ use alloc::collections::btree_map::BTreeMap;
 use alloc::{collections::btree_set::BTreeSet, fmt};
 use alloy_primitives::{Address, Bytes, StorageValue, B256, U256};
 use reth_execution_types::FlatPreState;
+use reth_revm::db::DbAccount;
 use reth_revm::{
     db::{Cache, CacheDB, DBErrorMarker},
     primitives::StorageKey,
@@ -48,7 +49,21 @@ impl FlatExecutionWitness {
     pub fn create_db(self) -> CacheDB<SelfDestructCompatibleFailingDB> {
         CacheDB {
             cache: Cache {
-                accounts: self.pre_state.accounts.into_iter().collect(),
+                accounts: self
+                    .pre_state
+                    .accounts
+                    .into_iter()
+                    .map(|(k, v)| {
+                        (
+                            k,
+                            DbAccount {
+                                account_state: v.account_state,
+                                info: v.info,
+                                storage: v.storage.into_iter().collect(),
+                            },
+                        )
+                    })
+                    .collect(),
                 contracts: self
                     .pre_state
                     .contracts

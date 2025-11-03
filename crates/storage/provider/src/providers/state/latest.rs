@@ -201,7 +201,14 @@ impl<Provider: DBProvider + BlockHashReader + Sync> StateProofProvider
                     }
                 }
             }
-            prestate.accounts.insert(*address, db_account);
+            prestate.accounts.insert(
+                *address,
+                reth_execution_types::witness::Account {
+                    account_state: db_account.account_state,
+                    info: db_account.info,
+                    storage: db_account.storage.into_iter().collect(),
+                },
+            );
         }
 
         Ok(prestate)
