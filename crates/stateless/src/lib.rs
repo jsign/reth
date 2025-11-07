@@ -97,9 +97,9 @@ macro_rules! track_cycles {
     ($name:expr, $body:expr) => {{
         #[cfg(target_os = "zkvm")]
         {
-            tracing::info!("cycle-tracker-report-start: {}", $name);
+            // tracing::info!("cycle-tracker-report-start: {}", $name);
             let result = $body;
-            tracing::info!("cycle-tracker-report-end: {}", $name);
+            // tracing::info!("cycle-tracker-report-end: {}", $name);
             result
         }
 
