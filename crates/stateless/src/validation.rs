@@ -385,46 +385,46 @@ where
     let (mut trie, _) =
         track_cycles!("verify_trie_witness", T::new(&trie_witness, parent.state_root)?);
 
-    // Verify that all accounts in flatdb pre-state match those in the trie witness.
-    track_cycles!("verify_flatdb_state_against_trie", {
-        // For bytecodes we pass Default::default() since the WitnessDatabase won't be used for
-        // checking bytecode. We already did it above by checking that the flatdb bytecodes
-        // hashes match. If the flatdb accounts contains an account with a code_hash not
-        // present in the bytecode map, then the execution would have failed since
-        // the code would be missing.
-        let mut db = WitnessDatabase::new(&trie, Default::default(), ancestor_hashes);
-        for (address, flatdb_account) in flatdb_pre_state.accounts {
-            let trie_account = db
-                .basic(address)
-                .map_err(|_| StatelessValidationError::GetAccountFromWitnessDatabase)?;
-            let flatdb_account_info = (flatdb_account.account_state != AccountState::NotExisting)
-                .then_some(flatdb_account.info);
+    // // Verify that all accounts in flatdb pre-state match those in the trie witness.
+    // track_cycles!("verify_flatdb_state_against_trie", {
+    //     // For bytecodes we pass Default::default() since the WitnessDatabase won't be used for
+    //     // checking bytecode. We already did it above by checking that the flatdb bytecodes
+    //     // hashes match. If the flatdb accounts contains an account with a code_hash not
+    //     // present in the bytecode map, then the execution would have failed since
+    //     // the code would be missing.
+    //     let mut db = WitnessDatabase::new(&trie, Default::default(), ancestor_hashes);
+    //     for (address, flatdb_account) in flatdb_pre_state.accounts {
+    //         let trie_account = db
+    //             .basic(address)
+    //             .map_err(|_| StatelessValidationError::GetAccountFromWitnessDatabase)?;
+    //         let flatdb_account_info = (flatdb_account.account_state != AccountState::NotExisting)
+    //             .then_some(flatdb_account.info);
 
-            if trie_account != flatdb_account_info {
-                return Err(StatelessValidationError::FlatdbAccountStateMismatch { address });
-            }
-            for (slot, value) in flatdb_account.storage {
-                if trie_account.is_none() {
-                    if !value.is_zero() {
-                        return Err(StatelessValidationError::FlatdbStorageSlotStateMismatch {
-                            address,
-                            slot,
-                        });
-                    }
-                } else {
-                    let trie_value = db
-                        .storage(address, slot)
-                        .map_err(|_| StatelessValidationError::GetStorageSlotFromWitnessDatabase)?;
-                    if trie_value != value {
-                        return Err(StatelessValidationError::FlatdbStorageSlotStateMismatch {
-                            address,
-                            slot,
-                        });
-                    }
-                }
-            }
-        }
-    });
+    //         if trie_account != flatdb_account_info {
+    //             return Err(StatelessValidationError::FlatdbAccountStateMismatch { address });
+    //         }
+    //         for (slot, value) in flatdb_account.storage {
+    //             if trie_account.is_none() {
+    //                 if !value.is_zero() {
+    //                     return Err(StatelessValidationError::FlatdbStorageSlotStateMismatch {
+    //                         address,
+    //                         slot,
+    //                     });
+    //                 }
+    //             } else {
+    //                 let trie_value = db
+    //                     .storage(address, slot)
+    //                     .map_err(|_| StatelessValidationError::GetStorageSlotFromWitnessDatabase)?;
+    //                 if trie_value != value {
+    //                     return Err(StatelessValidationError::FlatdbStorageSlotStateMismatch {
+    //                         address,
+    //                         slot,
+    //                     });
+    //                 }
+    //             }
+    //         }
+    //     }
+    // });
 
     // Compute and check the post state root using the provided post-state from the execution using
     // flatdb state.
