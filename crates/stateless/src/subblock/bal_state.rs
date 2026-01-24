@@ -3,6 +3,7 @@
 //! Converts a Block Access List to a `HashedPostState` for state root computation.
 
 use alloc::vec::Vec;
+use alloy_consensus::constants::KECCAK_EMPTY;
 use alloy_primitives::{keccak256, Address, B256, U256};
 use alloy_trie::TrieAccount;
 use reth_primitives_traits::Account;
@@ -49,7 +50,14 @@ pub trait PreStateAccountProvider {
 ///
 /// To get the final state, use `bal_index = num_transactions + 2` (or any index larger than
 /// the last write index).
-pub fn bal_to_hashed_post_state(bal: &Bal, bal_index: u64) -> HashedPostState {
+pub fn bal_to_hashed_post_state<P>(
+    bal: &Bal,
+    bal_index: u64,
+    pre_state: &P,
+) -> Result<HashedPostState, P::Error>
+where
+    P: PreStateAccountProvider,
+{
     let mut accounts = alloy_primitives::map::HashMap::default();
     let mut storages = alloy_primitives::map::HashMap::default();
 
@@ -95,7 +103,7 @@ pub fn bal_to_hashed_post_state(bal: &Bal, bal_index: u64) -> HashedPostState {
         }
     }
 
-    HashedPostState { accounts, storages }
+    Ok(HashedPostState { accounts, storages })
 }
 
 #[cfg(test)]
