@@ -153,6 +153,14 @@ impl StatelessTrie for StatelessSparseTrie {
     }
 }
 
+impl crate::subblock::PreStateAccountProvider for StatelessSparseTrie {
+    type Error = ProviderError;
+
+    fn account(&self, address: Address) -> Result<Option<TrieAccount>, Self::Error> {
+        self.account(address)
+    }
+}
+
 /// Verifies execution witness [`ExecutionWitness`] against an expected pre-state root.
 ///
 /// This function takes the RLP-encoded values provided in [`ExecutionWitness`]

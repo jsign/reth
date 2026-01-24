@@ -81,12 +81,9 @@ where
             };
 
             let account = Account {
-                nonce: nonce.unwrap_or_else(|| {
-                    pre_state_account.map(|a| a.nonce).unwrap_or(0)
-                }),
-                balance: balance.unwrap_or_else(|| {
-                    pre_state_account.map(|a| a.balance).unwrap_or(U256::ZERO)
-                }),
+                nonce: nonce.unwrap_or_else(|| pre_state_account.map(|a| a.nonce).unwrap_or(0)),
+                balance: balance
+                    .unwrap_or_else(|| pre_state_account.map(|a| a.balance).unwrap_or(U256::ZERO)),
                 bytecode_hash: code.map(|(hash, _)| hash).or_else(|| {
                     pre_state_account.and_then(|a| {
                         // KECCAK_EMPTY means no code, represented as None in Account
@@ -125,8 +122,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::collections::BTreeMap;
-    use alloc::vec;
+    use alloc::{collections::BTreeMap, vec};
     use alloy_primitives::Address;
     use alloy_trie::TrieAccount;
     use revm_state::bal::AccountBal;
@@ -155,10 +151,15 @@ mod tests {
         }
     }
 
+    /// Empty mock that returns None for all accounts (simulates all-new accounts).
+    fn empty_pre_state() -> MockPreState {
+        MockPreState::new()
+    }
+
     #[test]
     fn test_empty_bal() {
         let bal = Bal::new();
-        let state = bal_to_hashed_post_state(&bal, 1);
+        let state = bal_to_hashed_post_state(&bal, 1, &empty_pre_state()).unwrap();
         assert!(state.accounts.is_empty());
         assert!(state.storages.is_empty());
     }
@@ -175,13 +176,14 @@ mod tests {
         bal.accounts.insert(address, account_bal);
 
         // Query at index 1 should see the value written at index 0
-        let state = bal_to_hashed_post_state(&bal, 1);
+        // Using empty pre-state, so unchanged fields get defaults
+        let state = bal_to_hashed_post_state(&bal, 1, &empty_pre_state()).unwrap();
         assert_eq!(state.accounts.len(), 1);
 
         let hashed_address = keccak256(address);
         let account = state.accounts.get(&hashed_address).unwrap().unwrap();
         assert_eq!(account.balance, U256::from(100));
-        assert_eq!(account.nonce, 0); // default
+        assert_eq!(account.nonce, 0); // default (no pre-state)
         assert!(account.bytecode_hash.is_none()); // default
     }
 
@@ -202,7 +204,7 @@ mod tests {
         bal.accounts.insert(address, account_bal);
 
         // Query at index 1 should see the value written at index 0
-        let state = bal_to_hashed_post_state(&bal, 1);
+        let state = bal_to_hashed_post_state(&bal, 1, &empty_pre_state()).unwrap();
 
         let hashed_address = keccak256(address);
         assert!(state.storages.contains_key(&hashed_address));

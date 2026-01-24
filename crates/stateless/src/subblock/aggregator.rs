@@ -122,7 +122,9 @@ where
     // Index n+2 = after post-block (withdrawals, etc.)
     let final_bal_index = (tx_count + 2) as u64;
 
-    let hashed_post_state = bal_to_hashed_post_state(&bal, final_bal_index);
+    // Use the trie as the pre-state provider to look up unchanged account fields
+    let hashed_post_state = bal_to_hashed_post_state(&bal, final_bal_index, &trie)
+        .map_err(|e| AggregationValidationError::StatelessValidation(e.into()))?;
     let computed_root = trie
         .calculate_state_root(hashed_post_state)
         .map_err(AggregationValidationError::StatelessValidation)?;
