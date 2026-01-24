@@ -101,9 +101,35 @@ pub fn bal_to_hashed_post_state(bal: &Bal, bal_index: u64) -> HashedPostState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::collections::BTreeMap;
     use alloc::vec;
     use alloy_primitives::Address;
+    use alloy_trie::TrieAccount;
     use revm_state::bal::AccountBal;
+
+    /// Mock pre-state provider for testing.
+    struct MockPreState {
+        accounts: BTreeMap<Address, TrieAccount>,
+    }
+
+    impl MockPreState {
+        fn new() -> Self {
+            Self { accounts: BTreeMap::new() }
+        }
+
+        fn with_account(mut self, address: Address, account: TrieAccount) -> Self {
+            self.accounts.insert(address, account);
+            self
+        }
+    }
+
+    impl PreStateAccountProvider for MockPreState {
+        type Error = core::convert::Infallible;
+
+        fn account(&self, address: Address) -> Result<Option<TrieAccount>, Self::Error> {
+            Ok(self.accounts.get(&address).copied())
+        }
+    }
 
     #[test]
     fn test_empty_bal() {
