@@ -14,8 +14,7 @@ use crate::ExecutionWitness;
 /// Input to the worker guest program for subblock proving.
 ///
 /// Contains all data needed to execute a range of transactions within a block.
-#[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SubblockInput {
     /// The full block (header + body with ALL transactions).
     pub block: Block,
@@ -34,8 +33,7 @@ pub struct SubblockInput {
 }
 
 /// Output committed by the worker (lightweight - no intermediate state roots).
-#[derive(Clone, Debug, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct SubblockOutput<R = alloy_consensus::Receipt> {
     /// Receipts for transactions in this range.
     pub receipts: Vec<R>,
@@ -50,8 +48,7 @@ pub struct SubblockOutput<R = alloy_consensus::Receipt> {
 /// Input to the master/aggregator guest program.
 ///
 /// Contains verified subblock outputs for combining and final validation.
-#[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AggregationInput<R = Receipt> {
     /// The full block being validated.
     pub block: Block,
