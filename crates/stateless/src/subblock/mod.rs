@@ -6,8 +6,10 @@
 mod bal_witness_db;
 mod error;
 mod types;
+mod worker;
 
 pub use error::{AggregationValidationError, SubblockValidationError};
 pub use types::{AggregationInput, SubblockInput, SubblockOutput};
+pub use worker::subblock_validation;
 
 pub(crate) use bal_witness_db::BalWitnessDatabase;
