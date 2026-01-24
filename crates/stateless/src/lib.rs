@@ -35,6 +35,9 @@
 
 extern crate alloc;
 
+// Silence unused crate warning - revm-state re-exports the types we need from this crate
+use alloy_eip7928 as _;
+
 mod recover_block;
 /// Sparse trie implementation for stateless validation
 pub mod trie;

@@ -10819,6 +10819,8 @@ name = "reth-stateless"
 version = "1.10.2"
 dependencies = [
  "alloy-consensus",
+ "alloy-eip7928",
+ "alloy-eips",
  "alloy-genesis",
  "alloy-primitives",
  "alloy-rlp",
@@ -10836,6 +10838,8 @@ dependencies = [
  "reth-revm",
  "reth-trie-common",
  "reth-trie-sparse",
+ "revm-database-interface",
+ "revm-state",
  "secp256k1 0.30.0",
  "serde",
  "serde_with",
