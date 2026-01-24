@@ -11,7 +11,7 @@ mod types;
 mod worker;
 
 pub use aggregator::aggregation_validation;
-pub use bal_state::bal_to_hashed_post_state;
+pub use bal_state::{bal_to_hashed_post_state, PreStateAccountProvider};
 pub use error::{AggregationValidationError, SubblockValidationError};
 pub use types::{AggregationInput, SubblockInput, SubblockOutput};
 pub use worker::subblock_validation;
