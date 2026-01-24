@@ -187,4 +187,41 @@ mod tests {
         let hashed_slot = keccak256(B256::from(slot));
         assert_eq!(storage.storage.get(&hashed_slot), Some(&value));
     }
+
+    #[test]
+    fn test_bal_partial_change_uses_prestate() {
+        use alloy_consensus::constants::KECCAK_EMPTY;
+        use alloy_trie::EMPTY_ROOT_HASH;
+
+        let address = Address::repeat_byte(0x03);
+
+        // Pre-state: account with nonce=5, balance=100
+        let pre_account = TrieAccount {
+            nonce: 5,
+            balance: U256::from(100),
+            storage_root: EMPTY_ROOT_HASH,
+            code_hash: KECCAK_EMPTY,
+        };
+
+        let mock = MockPreState::new().with_account(address, pre_account);
+
+        // BAL: only balance changed to 200 at index 0
+        let mut bal = Bal::new();
+        let mut account_bal = AccountBal::default();
+        account_bal.account_info.balance.force_update(0, U256::from(200));
+        bal.accounts.insert(address, account_bal);
+
+        // Query at index 1
+        let state = bal_to_hashed_post_state(&bal, 1, &mock).unwrap();
+
+        let hashed_address = keccak256(address);
+        let account = state.accounts.get(&hashed_address).unwrap().unwrap();
+
+        // Balance should come from BAL
+        assert_eq!(account.balance, U256::from(200));
+        // Nonce should come from pre-state, NOT default 0
+        assert_eq!(account.nonce, 5);
+        // bytecode_hash should be None (KECCAK_EMPTY maps to None)
+        assert!(account.bytecode_hash.is_none());
+    }
 }
