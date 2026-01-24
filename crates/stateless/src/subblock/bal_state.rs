@@ -3,10 +3,26 @@
 //! Converts a Block Access List to a `HashedPostState` for state root computation.
 
 use alloc::vec::Vec;
-use alloy_primitives::{keccak256, B256, U256};
+use alloy_primitives::{keccak256, Address, B256, U256};
+use alloy_trie::TrieAccount;
 use reth_primitives_traits::Account;
 use reth_trie_common::{HashedPostState, HashedStorage};
 use revm_state::bal::Bal;
+
+/// Provider for pre-state account data during BAL conversion.
+///
+/// Used to look up existing account values when BAL only contains partial changes.
+pub trait PreStateAccountProvider {
+    /// Error type for account lookups.
+    type Error;
+
+    /// Returns the pre-state account for the given address.
+    ///
+    /// - `Ok(Some(account))` - account exists in pre-state
+    /// - `Ok(None)` - account proven to not exist (new account)
+    /// - `Err(...)` - witness incomplete, cannot determine pre-state
+    fn account(&self, address: Address) -> Result<Option<TrieAccount>, Self::Error>;
+}
 
 /// Converts a BAL to a `HashedPostState` at the given BAL index.
 ///
