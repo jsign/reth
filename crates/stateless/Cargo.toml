@@ -19,6 +19,8 @@ alloy-trie.workspace = true
 alloy-consensus.workspace = true
 alloy-rpc-types-debug.workspace = true
 alloy-genesis = { workspace = true, features = ["serde-bincode-compat"] }
+alloy-eips.workspace = true
+alloy-eip7928.workspace = true
 
 # reth
 reth-ethereum-consensus.workspace = true
@@ -31,6 +33,8 @@ reth-trie-common.workspace = true
 reth-trie-sparse.workspace = true
 reth-chainspec.workspace = true
 reth-consensus.workspace = true
+revm-database-interface.workspace = true
+revm-state.workspace = true
 
 # misc
 thiserror.workspace = true
