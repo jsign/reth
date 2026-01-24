@@ -53,12 +53,7 @@ where
         let mut bal_state = BalState::new().with_bal(bal);
         bal_state.bal_index = start_bal_index;
 
-        Self {
-            block_hashes_by_block_number: ancestor_hashes,
-            bytecode,
-            trie,
-            bal_state,
-        }
+        Self { block_hashes_by_block_number: ancestor_hashes, bytecode, trie, bal_state }
     }
 
     /// Bump the BAL index after executing a transaction or system call.
@@ -78,7 +73,7 @@ where
     /// Set the BAL index directly.
     #[inline]
     #[allow(dead_code)]
-    pub(crate) fn set_bal_index(&mut self, index: u64) {
+    pub(crate) const fn set_bal_index(&mut self, index: u64) {
         self.bal_state.bal_index = index;
     }
 }
@@ -113,14 +108,12 @@ where
 
     fn storage(&mut self, address: Address, slot: U256) -> Result<U256, Self::Error> {
         // Check BAL first for fast-forwarded value
-        if let Some(value) = self.bal_state.storage(&address, slot.into())? {
+        if let Some(value) = self.bal_state.storage(&address, slot)? {
             return Ok(value);
         }
 
         // Fall back to trie
-        self.trie
-            .storage(address, slot)
-            .map_err(EvmDatabaseError::Database)
+        self.trie.storage(address, slot).map_err(EvmDatabaseError::Database)
     }
 
     fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
@@ -132,11 +125,8 @@ where
     }
 
     fn block_hash(&mut self, block_number: u64) -> Result<B256, Self::Error> {
-        self.block_hashes_by_block_number
-            .get(&block_number)
-            .copied()
-            .ok_or_else(|| {
-                EvmDatabaseError::Database(ProviderError::StateForNumberNotFound(block_number))
-            })
+        self.block_hashes_by_block_number.get(&block_number).copied().ok_or_else(|| {
+            EvmDatabaseError::Database(ProviderError::StateForNumberNotFound(block_number))
+        })
     }
 }

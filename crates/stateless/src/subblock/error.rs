@@ -9,7 +9,9 @@ use crate::validation::StatelessValidationError;
 #[derive(Debug, thiserror::Error)]
 pub enum SubblockValidationError {
     /// Transaction range is out of bounds.
-    #[error("transaction range {start}..{end} is out of bounds (block has {tx_count} transactions)")]
+    #[error(
+        "transaction range {start}..{end} is out of bounds (block has {tx_count} transactions)"
+    )]
     TxRangeOutOfBounds {
         /// Start of the requested range.
         start: usize,

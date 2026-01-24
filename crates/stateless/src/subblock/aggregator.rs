@@ -48,14 +48,8 @@ pub fn aggregation_validation<ChainSpec>(
 where
     ChainSpec: Send + Sync + EthChainSpec<Header = Header> + EthereumHardforks + Debug,
 {
-    let AggregationInput {
-        block,
-        witness,
-        bal,
-        chain_config: _,
-        subblock_outputs,
-        tx_ranges,
-    } = input;
+    let AggregationInput { block, witness, bal, chain_config: _, subblock_outputs, tx_ranges } =
+        input;
 
     // Validate we have outputs
     if subblock_outputs.is_empty() {
@@ -79,9 +73,8 @@ where
     verify_gas_chaining(&subblock_outputs, &tx_ranges)?;
 
     // Recover signers (for block hash computation)
-    let recovered_block =
-        recover_block_with_public_keys(block.clone(), public_keys, &*chain_spec)
-            .map_err(AggregationValidationError::StatelessValidation)?;
+    let recovered_block = recover_block_with_public_keys(block.clone(), public_keys, &*chain_spec)
+        .map_err(AggregationValidationError::StatelessValidation)?;
 
     // Parse ancestor headers from witness
     let mut ancestor_headers: Vec<_> = witness
@@ -89,23 +82,21 @@ where
         .iter()
         .map(|bytes| {
             let hash = keccak256(bytes);
-            alloy_rlp::decode_exact::<Header>(bytes)
-                .map(|h| SealedHeader::new(h, hash))
-                .map_err(|_| {
+            alloy_rlp::decode_exact::<Header>(bytes).map(|h| SealedHeader::new(h, hash)).map_err(
+                |_| {
                     AggregationValidationError::StatelessValidation(
                         StatelessValidationError::HeaderDeserializationFailed,
                     )
-                })
+                },
+            )
         })
         .collect::<Result<_, _>>()?;
     ancestor_headers.sort_by_key(|header| header.number());
 
     // Get parent header for pre-state root
-    let parent = ancestor_headers
-        .last()
-        .ok_or(AggregationValidationError::StatelessValidation(
-            StatelessValidationError::MissingAncestorHeader,
-        ))?;
+    let parent = ancestor_headers.last().ok_or(AggregationValidationError::StatelessValidation(
+        StatelessValidationError::MissingAncestorHeader,
+    ))?;
 
     // Combine outputs
     let (combined_receipts, combined_bloom, combined_requests) =
@@ -160,10 +151,7 @@ fn verify_ranges_complete(
         if tx_count == 0 {
             return Ok(());
         }
-        return Err(AggregationValidationError::IncompleteRanges {
-            covered: 0,
-            tx_count,
-        });
+        return Err(AggregationValidationError::IncompleteRanges { covered: 0, tx_count });
     }
 
     // First range must start at 0
@@ -188,10 +176,7 @@ fn verify_ranges_complete(
     // Last range must end at tx_count
     let last_end = tx_ranges.last().map(|r| r.end).unwrap_or(0);
     if last_end != tx_count {
-        return Err(AggregationValidationError::IncompleteRanges {
-            covered: last_end,
-            tx_count,
-        });
+        return Err(AggregationValidationError::IncompleteRanges { covered: last_end, tx_count });
     }
 
     Ok(())
@@ -296,10 +281,7 @@ mod tests {
         let ranges = vec![0..5];
         assert!(matches!(
             verify_ranges_complete(&ranges, 10),
-            Err(AggregationValidationError::IncompleteRanges {
-                covered: 5,
-                tx_count: 10
-            })
+            Err(AggregationValidationError::IncompleteRanges { covered: 5, tx_count: 10 })
         ));
     }
 }

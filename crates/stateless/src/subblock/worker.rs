@@ -12,9 +12,7 @@ use reth_primitives_traits::SealedHeader;
 
 use crate::{
     recover_block::{recover_block_with_public_keys, UncompressedPublicKey},
-    subblock::{
-        error::SubblockValidationError, BalWitnessDatabase, SubblockInput, SubblockOutput,
-    },
+    subblock::{error::SubblockValidationError, BalWitnessDatabase, SubblockInput, SubblockOutput},
     trie::StatelessSparseTrie,
     validation::StatelessValidationError,
 };
@@ -44,15 +42,7 @@ where
     ChainSpec: Send + Sync + EthChainSpec<Header = Header> + EthereumHardforks + Debug,
     E: ConfigureEvm<Primitives = EthPrimitives> + Clone + 'static,
 {
-    let SubblockInput {
-        block,
-        witness,
-        bal,
-        tx_range,
-        chain_config: _,
-        is_first,
-        is_last,
-    } = input;
+    let SubblockInput { block, witness, bal, tx_range, chain_config: _, is_first, is_last } = input;
 
     // Validate tx range
     let tx_count = block.body.transactions.len();
@@ -65,8 +55,7 @@ where
     }
 
     // Recover signers
-    let recovered_block =
-        recover_block_with_public_keys(block.clone(), public_keys, &*chain_spec)?;
+    let recovered_block = recover_block_with_public_keys(block, public_keys, &*chain_spec)?;
 
     // Parse ancestor headers from witness
     let mut ancestor_headers: Vec<_> = witness
@@ -74,21 +63,19 @@ where
         .iter()
         .map(|bytes| {
             let hash = keccak256(bytes);
-            alloy_rlp::decode_exact::<Header>(bytes)
-                .map(|h| SealedHeader::new(h, hash))
-                .map_err(|_| {
+            alloy_rlp::decode_exact::<Header>(bytes).map(|h| SealedHeader::new(h, hash)).map_err(
+                |_| {
                     SubblockValidationError::StatelessValidation(
                         StatelessValidationError::HeaderDeserializationFailed,
                     )
-                })
+                },
+            )
         })
         .collect::<Result<_, _>>()?;
     ancestor_headers.sort_by_key(|header| header.number());
 
     // Get parent header for pre-state root
-    let parent = ancestor_headers
-        .last()
-        .ok_or(StatelessValidationError::MissingAncestorHeader)?;
+    let parent = ancestor_headers.last().ok_or(StatelessValidationError::MissingAncestorHeader)?;
 
     // Build the trie from witness
     let (trie, bytecode) = StatelessSparseTrie::new(&witness, parent.state_root)?;
@@ -105,8 +92,8 @@ where
     // - BAL index 0 = pre-execution state
     // - BAL index 1 = after pre-block system calls (beacon root, blockhashes)
     // - BAL index 2+ = after tx 0, 1, ...
-    // So for tx_range.start, we need BAL index = tx_range.start + 1 (if first) or tx_range.start + 1
-    // Actually: if is_first, we start at index 0 and bump after pre-block logic
+    // So for tx_range.start, we need BAL index = tx_range.start + 1 (if first) or tx_range.start +
+    // 1 Actually: if is_first, we start at index 0 and bump after pre-block logic
     // If not is_first, we start at index tx_range.start + 1 (pre-block + previous txs)
     let start_bal_index = if is_first {
         0 // Will be bumped after pre-block logic
@@ -155,22 +142,10 @@ where
     }
 
     // Get cumulative gas used at end of our range
-    let cumulative_gas_used = receipts
-        .last()
-        .map(|r| r.cumulative_gas_used())
-        .unwrap_or(0);
+    let cumulative_gas_used = receipts.last().map(|r| r.cumulative_gas_used()).unwrap_or(0);
 
     // Requests are only collected if this is the last subblock
-    let requests = if is_last {
-        output.requests.clone()
-    } else {
-        Default::default()
-    };
+    let requests = if is_last { output.requests.clone() } else { Default::default() };
 
-    Ok(SubblockOutput {
-        receipts,
-        logs_bloom,
-        requests,
-        cumulative_gas_used,
-    })
+    Ok(SubblockOutput { receipts, logs_bloom, requests, cumulative_gas_used })
 }

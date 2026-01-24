@@ -1,6 +1,6 @@
-//! BAL to HashedPostState conversion utilities.
+//! BAL to `HashedPostState` conversion utilities.
 //!
-//! Converts a Block Access List to a HashedPostState for state root computation.
+//! Converts a Block Access List to a `HashedPostState` for state root computation.
 
 use alloc::vec::Vec;
 use alloy_primitives::{keccak256, B256, U256};
@@ -16,7 +16,7 @@ use revm_state::bal::Bal;
 /// # Arguments
 ///
 /// * `bal` - The Block Access List containing all state changes
-/// * `bal_index` - The BAL index to read final values from (typically num_transactions + 2 for
+/// * `bal_index` - The BAL index to read final values from (typically `num_transactions` + 2 for
 ///   post-block)
 ///
 /// # Returns
@@ -37,7 +37,7 @@ pub fn bal_to_hashed_post_state(bal: &Bal, bal_index: u64) -> HashedPostState {
     let mut accounts = alloy_primitives::map::HashMap::default();
     let mut storages = alloy_primitives::map::HashMap::default();
 
-    for (address, account_bal) in bal.accounts.iter() {
+    for (address, account_bal) in &bal.accounts {
         let hashed_address = keccak256(address);
 
         // Get account info at bal_index
@@ -65,7 +65,7 @@ pub fn bal_to_hashed_post_state(bal: &Bal, bal_index: u64) -> HashedPostState {
         // Process storage changes
         let mut storage_changes: Vec<(B256, U256)> = Vec::new();
 
-        for (slot, slot_writes) in account_bal.storage.storage.iter() {
+        for (slot, slot_writes) in &account_bal.storage.storage {
             if let Some(value) = slot_writes.get(bal_index) {
                 let hashed_slot = keccak256(B256::from(*slot));
                 storage_changes.push((hashed_slot, value));

@@ -18,11 +18,11 @@ use crate::ExecutionWitness;
 pub struct SubblockInput {
     /// The full block (header + body with ALL transactions).
     pub block: Block,
-    /// ExecutionWitness for the entire block (pre-state).
+    /// `ExecutionWitness` for the entire block (pre-state).
     pub witness: ExecutionWitness,
     /// Block Access List for the entire block.
     pub bal: Arc<Bal>,
-    /// Transaction range to execute: [start_tx_index, end_tx_index).
+    /// Transaction range to execute: `[start_tx_index, end_tx_index)`.
     pub tx_range: Range<usize>,
     /// Chain config for fork rules.
     pub chain_config: ChainConfig,
@@ -39,7 +39,7 @@ pub struct SubblockOutput<R = alloy_consensus::Receipt> {
     pub receipts: Vec<R>,
     /// Logs bloom for this range.
     pub logs_bloom: Bloom,
-    /// EIP-7685 requests from this range (only populated if is_last).
+    /// EIP-7685 requests from this range (only populated if `is_last`).
     pub requests: Requests,
     /// Cumulative gas used at end of range.
     pub cumulative_gas_used: u64,
@@ -52,7 +52,7 @@ pub struct SubblockOutput<R = alloy_consensus::Receipt> {
 pub struct AggregationInput<R = Receipt> {
     /// The full block being validated.
     pub block: Block,
-    /// ExecutionWitness for the entire block.
+    /// `ExecutionWitness` for the entire block.
     pub witness: ExecutionWitness,
     /// Block Access List for the entire block.
     pub bal: Arc<Bal>,
