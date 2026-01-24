@@ -61,6 +61,12 @@ pub use alloy_rpc_types_debug::ExecutionWitness;
 
 pub use alloy_genesis::Genesis;
 
+// Subblock proving re-exports
+pub use subblock::{
+    aggregation_validation, bal_to_hashed_post_state, subblock_validation, AggregationInput,
+    AggregationValidationError, SubblockInput, SubblockOutput, SubblockValidationError,
+};
+
 use reth_ethereum_primitives::Block;
 
 /// `StatelessInput` is a convenience structure for serializing the input needed
