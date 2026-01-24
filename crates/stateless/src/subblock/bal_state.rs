@@ -73,14 +73,30 @@ where
         let has_account_changes = nonce.is_some() || balance.is_some() || code.is_some();
 
         if has_account_changes {
-            // Build account - we use default values if a field wasn't changed
-            // Note: This assumes changes are relative to some base state. In reality,
-            // if nonce/balance/code weren't written, they remain at their pre-state values.
-            // For destroyed accounts, all fields would be written as 0/empty.
+            // Query pre-state only if we need fallback values
+            let pre_state_account = if nonce.is_none() || balance.is_none() || code.is_none() {
+                pre_state.account(*address)?
+            } else {
+                None
+            };
+
             let account = Account {
-                nonce: nonce.unwrap_or(0),
-                balance: balance.unwrap_or(U256::ZERO),
-                bytecode_hash: code.map(|(hash, _)| hash),
+                nonce: nonce.unwrap_or_else(|| {
+                    pre_state_account.map(|a| a.nonce).unwrap_or(0)
+                }),
+                balance: balance.unwrap_or_else(|| {
+                    pre_state_account.map(|a| a.balance).unwrap_or(U256::ZERO)
+                }),
+                bytecode_hash: code.map(|(hash, _)| hash).or_else(|| {
+                    pre_state_account.and_then(|a| {
+                        // KECCAK_EMPTY means no code, represented as None in Account
+                        if a.code_hash == KECCAK_EMPTY {
+                            None
+                        } else {
+                            Some(a.code_hash)
+                        }
+                    })
+                }),
             };
 
             accounts.insert(hashed_address, Some(account));
