@@ -53,6 +53,9 @@ pub use validation::stateless_validation_with_trie;
 pub mod validation;
 pub(crate) mod witness_db;
 
+/// Subblock proving for parallelized block validation
+pub mod subblock;
+
 #[doc(inline)]
 pub use alloy_rpc_types_debug::ExecutionWitness;
 
