@@ -21,8 +21,22 @@ use crate::{
 
 /// Executes a subblock (range of transactions) using BAL fast-forwarding.
 ///
-/// This function validates and executes transactions in the BAL index range `[bal_range.start,
-/// bal_range.end)` using the provided BAL to fast-forward state to the starting BAL index.
+/// This function validates and executes ONLY the transactions in the BAL index range
+/// `[bal_range.start, bal_range.end)` using the provided BAL to fast-forward state
+/// to the starting BAL index.
+///
+/// ## Partial Execution
+///
+/// Unlike full-block execution, this function:
+/// - Applies pre-execution changes (beacon root, blockhashes) only if `bal_range.start == 0`
+/// - Executes only transactions corresponding to the BAL range
+/// - Note: Due to type system limitations, withdrawals are processed for all subblocks that call
+///   `finish()`. See the implementation comments for details.
+///
+/// ## Cumulative Gas
+///
+/// Receipts contain LOCAL cumulative gas (starting from 0 for this subblock).
+/// The aggregator adjusts to global cumulative gas when combining outputs.
 ///
 /// # Arguments
 ///

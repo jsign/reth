@@ -25,11 +25,17 @@ use crate::{
 /// Validates aggregated subblock outputs and computes the final state root.
 ///
 /// This function:
-/// 1. Verifies transaction ranges are complete and contiguous
-/// 2. Verifies gas chaining between subblocks
-/// 3. Combines receipts and logs blooms
+/// 1. Verifies BAL ranges are complete and contiguous
+/// 2. Verifies gas values are reasonable within each subblock
+/// 3. Combines receipts (adjusting cumulative gas), logs blooms, and requests
 /// 4. Runs post-block validation
 /// 5. Computes final state root from BAL
+///
+/// ## Gas Adjustment
+///
+/// Each subblock's receipts have LOCAL cumulative gas. This function adjusts
+/// them to GLOBAL cumulative gas by adding offsets based on previous subblocks'
+/// total gas usage.
 ///
 /// # Arguments
 ///
