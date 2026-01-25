@@ -7,12 +7,14 @@ mod aggregator;
 mod bal_state;
 mod bal_witness_db;
 mod error;
+mod execution;
 mod types;
 mod worker;
 
 pub use aggregator::aggregation_validation;
 pub use bal_state::{bal_to_hashed_post_state, PreStateAccountProvider};
 pub use error::{AggregationValidationError, SubblockValidationError};
+pub use execution::create_subblock_execution_ctx;
 pub use types::{AggregationInput, SubblockInput, SubblockOutput};
 pub use worker::subblock_validation;
 
