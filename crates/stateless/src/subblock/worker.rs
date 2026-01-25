@@ -4,17 +4,22 @@
 
 use alloc::{fmt::Debug, sync::Arc, vec::Vec};
 use alloy_consensus::{BlockHeader, Header, TxReceipt};
-use alloy_evm::block::BlockExecutor;
+use alloy_evm::{block::BlockExecutor, eth::spec::EthExecutorSpec};
 use alloy_primitives::{keccak256, Bloom};
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
-use reth_ethereum_primitives::{EthPrimitives, EthereumReceipt};
+use reth_ethereum_forks::Hardforks;
+use reth_ethereum_primitives::EthereumReceipt;
 use reth_evm::ConfigureEvm;
+use reth_evm_ethereum::EthEvmConfig;
 use reth_primitives_traits::SealedHeader;
 use reth_revm::db::State;
 
 use crate::{
     recover_block::{recover_block_with_public_keys, UncompressedPublicKey},
-    subblock::{error::SubblockValidationError, BalWitnessDatabase, SubblockInput, SubblockOutput},
+    subblock::{
+        create_subblock_execution_ctx, error::SubblockValidationError, BalWitnessDatabase,
+        SubblockInput, SubblockOutput,
+    },
     trie::StatelessSparseTrie,
     validation::StatelessValidationError,
 };
@@ -30,8 +35,7 @@ use crate::{
 /// Unlike full-block execution, this function:
 /// - Applies pre-execution changes (beacon root, blockhashes) only if `bal_range.start == 0`
 /// - Executes only transactions corresponding to the BAL range
-/// - Note: Due to type system limitations, withdrawals are processed for all subblocks that call
-///   `finish()`. See the implementation comments for details.
+/// - Processes withdrawals only for the last subblock (when `bal_range.end > tx_count`)
 ///
 /// ## Cumulative Gas
 ///
@@ -43,20 +47,26 @@ use crate::{
 /// * `input` - The subblock input containing block, witness, BAL, and BAL index range
 /// * `public_keys` - Public keys for transaction signature recovery
 /// * `chain_spec` - Chain specification for fork rules
-/// * `evm_config` - EVM configuration
+/// * `evm_config` - EVM configuration (concrete `EthEvmConfig` for proper withdrawal handling)
 ///
 /// # Returns
 ///
 /// Returns `SubblockOutput` containing receipts, logs bloom, requests, and cumulative gas.
-pub fn subblock_validation<ChainSpec, E>(
+pub fn subblock_validation<ChainSpec>(
     input: SubblockInput,
     public_keys: Vec<UncompressedPublicKey>,
     chain_spec: Arc<ChainSpec>,
-    evm_config: E,
+    evm_config: EthEvmConfig<ChainSpec>,
 ) -> Result<SubblockOutput<EthereumReceipt>, SubblockValidationError>
 where
-    ChainSpec: Send + Sync + EthChainSpec<Header = Header> + EthereumHardforks + Debug,
-    E: ConfigureEvm<Primitives = EthPrimitives> + 'static,
+    ChainSpec: Send
+        + Sync
+        + EthChainSpec<Header = Header>
+        + EthereumHardforks
+        + Hardforks
+        + EthExecutorSpec
+        + Debug
+        + 'static,
 {
     let SubblockInput { block, witness, bal, bal_range, chain_config: _ } = input;
 
@@ -119,7 +129,7 @@ where
     // is_first: BAL range starts at 0 (includes pre-execution system calls)
     // is_last: BAL range ends beyond tx_count (includes post-execution/withdrawals)
     let is_first = bal_range.start == 0;
-    let _is_last = bal_range.end > tx_count as u64;
+    let is_last = bal_range.end > tx_count as u64;
 
     // Convert BAL range to tx indices for execution
     // BAL index i corresponds to tx i-1 (index 1 = tx 0, index 2 = tx 1, etc.)
@@ -133,13 +143,18 @@ where
     // Get sealed block reference for EVM creation
     let sealed_block = recovered_block.sealed_block();
 
-    // Create block executor using the standard context
-    // Note: We use executor_for_block which creates a full context, then we control
-    // which operations we actually perform based on subblock position
-    let mut block_executor =
-        evm_config.executor_for_block(&mut state_db, sealed_block).map_err(|e| {
-            SubblockValidationError::ExecutionFailed(alloc::string::ToString::to_string(&e))
-        })?;
+    // Create EVM environment
+    let evm = evm_config.evm_for_block(&mut state_db, sealed_block.header()).map_err(|e| {
+        SubblockValidationError::ExecutionFailed(alloc::string::ToString::to_string(&e))
+    })?;
+
+    // Create custom execution context with proper withdrawal handling:
+    // - Non-last subblocks have withdrawals=None to skip withdrawal processing
+    // - Only the last subblock processes withdrawals
+    let ctx = create_subblock_execution_ctx(&recovered_block, is_first, is_last);
+
+    // Create executor with our custom context
+    let mut block_executor = evm_config.create_executor(evm, ctx);
 
     // Apply pre-execution changes only if this is the first subblock
     // This handles beacon root and blockhashes system calls at BAL index 0
@@ -157,12 +172,7 @@ where
     }
 
     // Finish execution to get receipts
-    // LIMITATION: This processes withdrawals for ALL subblocks due to how executor_for_block
-    // creates the context. For blocks with withdrawals, this means withdrawal balance credits
-    // are applied multiple times. This is a known limitation - a proper fix would require
-    // a custom execution context, which is blocked by Rust's associated type system.
-    // The aggregator compensates by only using requests from the last subblock.
-    // TODO: Implement proper custom context support for correct withdrawal handling
+    // Withdrawals are only processed if is_last=true (context has withdrawals=Some)
     let (_evm, result) = block_executor.finish().map_err(|e| {
         SubblockValidationError::ExecutionFailed(alloc::string::ToString::to_string(&e))
     })?;
@@ -181,7 +191,7 @@ where
     // The aggregator will adjust to global cumulative gas
     let cumulative_gas_used = receipts.last().map(|r| r.cumulative_gas_used()).unwrap_or(0);
 
-    // Requests are only populated if this is the last subblock (due to custom context)
+    // Requests are only populated for the last subblock (withdrawals processed there)
     let requests = result.requests;
 
     Ok(SubblockOutput { receipts, logs_bloom, requests, cumulative_gas_used })
