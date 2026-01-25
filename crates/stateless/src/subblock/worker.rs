@@ -4,7 +4,10 @@
 
 use alloc::{fmt::Debug, sync::Arc, vec::Vec};
 use alloy_consensus::{BlockHeader, Header, TxReceipt};
-use alloy_evm::block::BlockExecutor;
+use alloy_evm::{
+    block::{BlockExecutor, BlockExecutorFactory},
+    eth::EthBlockExecutionCtx,
+};
 use alloy_primitives::{keccak256, Bloom};
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_ethereum_primitives::{EthPrimitives, EthereumReceipt};
@@ -15,11 +18,8 @@ use reth_revm::db::State;
 use crate::{
     recover_block::{recover_block_with_public_keys, UncompressedPublicKey},
     subblock::{
-        create_subblock_execution_ctx,
-        error::SubblockValidationError,
-        BalWitnessDatabase,
-        SubblockInput,
-        SubblockOutput,
+        create_subblock_execution_ctx, error::SubblockValidationError, BalWitnessDatabase,
+        SubblockInput, SubblockOutput,
     },
     trie::StatelessSparseTrie,
     validation::StatelessValidationError,
@@ -49,6 +49,8 @@ pub fn subblock_validation<ChainSpec, E>(
 where
     ChainSpec: Send + Sync + EthChainSpec<Header = Header> + EthereumHardforks + Debug,
     E: ConfigureEvm<Primitives = EthPrimitives> + Clone + 'static,
+    E::BlockExecutorFactory:
+        for<'a> BlockExecutorFactory<ExecutionCtx<'a> = EthBlockExecutionCtx<'a>>,
 {
     let SubblockInput { block, witness, bal, bal_range, chain_config: _ } = input;
 
@@ -107,38 +109,56 @@ where
     // Create BAL-aware database
     let db = BalWitnessDatabase::new(&trie, bytecode, ancestor_hashes, bal, start_bal_index);
 
-    // Pre-block logic (if first subblock)
-    // Pre-execution system calls (beacon root, blockhashes) happen at BAL index 0.
-    // The executor handles the actual calls and BAL index bumping internally.
-    // After pre-execution, index becomes 1 (ready for tx 0).
+    // Determine subblock position flags
+    // is_first: BAL range starts at 0 (includes pre-execution system calls)
+    // is_last: BAL range ends beyond tx_count (includes post-execution/withdrawals)
+    let is_first = bal_range.start == 0;
+    let is_last = bal_range.end > tx_count as u64;
 
-    // Execute transactions in range
-    // Note: We create a partial block view for the executor containing only our tx range
-    // However, the current executor API expects the full block. We'll need to handle
-    // receipt cumulative gas adjustment.
-
-    // For now, we execute the full block but only collect receipts for our range
-    // TODO: Optimize to only execute our tx range once executor supports partial execution
-    let executor = evm_config.executor(db);
-    let output = executor.execute(&recovered_block).map_err(|e| {
-        SubblockValidationError::ExecutionFailed(alloc::string::ToString::to_string(&e))
-    })?;
-
-    // Convert BAL range to tx indices for receipt extraction.
+    // Convert BAL range to tx indices for execution
     // BAL index i corresponds to tx i-1 (index 1 = tx 0, index 2 = tx 1, etc.)
-    // tx_start = first tx index in range (BAL index 0 has no tx, so clamp to 1)
-    // tx_end = tx index after last tx in range (capped at tx_count)
     let tx_start = if bal_range.start == 0 { 0 } else { (bal_range.start - 1) as usize };
     let tx_end = ((bal_range.end.saturating_sub(1)) as usize).min(tx_count);
 
-    // Extract only the receipts for our range
-    let receipts: Vec<_> = output
-        .receipts
-        .iter()
-        .skip(tx_start)
-        .take(tx_end.saturating_sub(tx_start))
-        .cloned()
-        .collect();
+    // Wrap database in State for executor compatibility
+    let mut state_db =
+        State::builder().with_database(db).with_bundle_update().without_state_clear().build();
+
+    // Get sealed block reference for EVM creation
+    let sealed_block = recovered_block.sealed_block();
+
+    // Create custom execution context based on subblock position
+    let ctx = create_subblock_execution_ctx(&recovered_block, is_first, is_last);
+
+    // Create EVM configured for this block
+    let evm = evm_config.evm_for_block(&mut state_db, sealed_block.header()).map_err(|e| {
+        SubblockValidationError::ExecutionFailed(alloc::string::ToString::to_string(&e))
+    })?;
+
+    // Create block executor with custom context
+    let mut block_executor = evm_config.create_executor(evm, ctx);
+
+    // Apply pre-execution changes only if this is the first subblock
+    if is_first {
+        block_executor.apply_pre_execution_changes().map_err(|e| {
+            SubblockValidationError::ExecutionFailed(alloc::string::ToString::to_string(&e))
+        })?;
+    }
+
+    // Execute only our transaction range
+    for tx in recovered_block.transactions_recovered().skip(tx_start).take(tx_end - tx_start) {
+        block_executor.execute_transaction(tx).map_err(|e| {
+            SubblockValidationError::ExecutionFailed(alloc::string::ToString::to_string(&e))
+        })?;
+    }
+
+    // Finish execution - withdrawals only processed if is_last (due to custom context)
+    let (_evm, result) = block_executor.finish().map_err(|e| {
+        SubblockValidationError::ExecutionFailed(alloc::string::ToString::to_string(&e))
+    })?;
+
+    // Get receipts directly from result (already contains only our executed txs)
+    let receipts: Vec<EthereumReceipt> = result.receipts;
 
     // Compute logs bloom for this range
     let mut logs_bloom = Bloom::default();
@@ -147,12 +167,12 @@ where
     }
 
     // Get cumulative gas used at end of our range
+    // Note: This is LOCAL cumulative gas (starting from 0 for this subblock)
+    // The aggregator will adjust to global cumulative gas
     let cumulative_gas_used = receipts.last().map(|r| r.cumulative_gas_used()).unwrap_or(0);
 
-    // Requests are only collected if this is the last subblock
-    // Last subblock must include post-execution (BAL index tx_count + 1)
-    let is_last = bal_range.end > tx_count as u64;
-    let requests = if is_last { output.requests.clone() } else { Default::default() };
+    // Requests are only populated if this is the last subblock (due to custom context)
+    let requests = result.requests;
 
     Ok(SubblockOutput { receipts, logs_bloom, requests, cumulative_gas_used })
 }
