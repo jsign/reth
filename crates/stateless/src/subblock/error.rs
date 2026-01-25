@@ -8,17 +8,15 @@ use crate::validation::StatelessValidationError;
 /// Errors that can occur during subblock validation.
 #[derive(Debug, thiserror::Error)]
 pub enum SubblockValidationError {
-    /// Transaction range is out of bounds.
-    #[error(
-        "transaction range {start}..{end} is out of bounds (block has {tx_count} transactions)"
-    )]
-    TxRangeOutOfBounds {
-        /// Start of the requested range.
-        start: usize,
-        /// End of the requested range.
-        end: usize,
-        /// Number of transactions in the block.
-        tx_count: usize,
+    /// BAL index range is out of bounds.
+    #[error("BAL range {start}..{end} is out of bounds (max BAL index is {max_bal_index})")]
+    BalRangeOutOfBounds {
+        /// Start of the requested BAL range.
+        start: u64,
+        /// End of the requested BAL range.
+        end: u64,
+        /// Maximum valid BAL index (`tx_count` + 2).
+        max_bal_index: u64,
     },
 
     /// Error from the underlying stateless validation.

@@ -19,12 +19,12 @@ use crate::{
 
 /// Executes a subblock (range of transactions) using BAL fast-forwarding.
 ///
-/// This function validates and executes transactions in the range `[tx_range.start, tx_range.end)`
-/// using the provided BAL to fast-forward state to the starting transaction index.
+/// This function validates and executes transactions in the BAL index range `[bal_range.start,
+/// bal_range.end)` using the provided BAL to fast-forward state to the starting BAL index.
 ///
 /// # Arguments
 ///
-/// * `input` - The subblock input containing block, witness, BAL, and tx range
+/// * `input` - The subblock input containing block, witness, BAL, and BAL index range
 /// * `public_keys` - Public keys for transaction signature recovery
 /// * `chain_spec` - Chain specification for fork rules
 /// * `evm_config` - EVM configuration
@@ -42,18 +42,23 @@ where
     ChainSpec: Send + Sync + EthChainSpec<Header = Header> + EthereumHardforks + Debug,
     E: ConfigureEvm<Primitives = EthPrimitives> + Clone + 'static,
 {
-    let SubblockInput { block, witness, bal, tx_range, chain_config: _, is_first, is_last } = input;
+    let SubblockInput { block, witness, bal, bal_range, chain_config: _ } = input;
 
-    // Validate tx range
+    // Validate BAL range
     let tx_count = block.body.transactions.len();
-    if tx_range.end > tx_count {
-        return Err(SubblockValidationError::TxRangeOutOfBounds {
-            start: tx_range.start,
-            end: tx_range.end,
-            tx_count,
+    // BAL index semantics per EIP-7928:
+    // - Index 0 = pre-execution system calls
+    // - Index 1..n = transactions (tx i-1 at index i)
+    // - Index n+1 = post-execution (withdrawals)
+    // Max valid index is tx_count + 1 (inclusive), so range.end can be at most tx_count + 2
+    let max_bal_index = (tx_count + 2) as u64;
+    if bal_range.end > max_bal_index {
+        return Err(SubblockValidationError::BalRangeOutOfBounds {
+            start: bal_range.start,
+            end: bal_range.end,
+            max_bal_index,
         });
     }
-
     // Recover signers
     let recovered_block = recover_block_with_public_keys(block, public_keys, &*chain_spec)?;
 
@@ -88,18 +93,8 @@ where
         child_header = parent_header;
     }
 
-    // BAL index semantics per EIP-7928:
-    // - Index 0 = pre-execution system contract calls (beacon root, blockhashes)
-    // - Index 1..n = individual transactions (tx 0 at index 1, tx 1 at index 2, ...)
-    // - Index n+1 = post-execution (withdrawals)
-    //
-    // If is_first, we start at index 0 (pre-execution system calls).
-    // Otherwise, we start at tx_range.start + 1 (the index for that transaction).
-    let start_bal_index = if is_first {
-        0
-    } else {
-        (tx_range.start + 1) as u64
-    };
+    // Start BAL index comes directly from the bal_range
+    let start_bal_index = bal_range.start;
 
     // Create BAL-aware database
     let db = BalWitnessDatabase::new(&trie, bytecode, ancestor_hashes, bal, start_bal_index);
@@ -121,12 +116,19 @@ where
         SubblockValidationError::ExecutionFailed(alloc::string::ToString::to_string(&e))
     })?;
 
+    // Convert BAL range to tx indices for receipt extraction.
+    // BAL index i corresponds to tx i-1 (index 1 = tx 0, index 2 = tx 1, etc.)
+    // tx_start = first tx index in range (BAL index 0 has no tx, so clamp to 1)
+    // tx_end = tx index after last tx in range (capped at tx_count)
+    let tx_start = if bal_range.start == 0 { 0 } else { (bal_range.start - 1) as usize };
+    let tx_end = ((bal_range.end.saturating_sub(1)) as usize).min(tx_count);
+
     // Extract only the receipts for our range
     let receipts: Vec<_> = output
         .receipts
         .iter()
-        .skip(tx_range.start)
-        .take(tx_range.end - tx_range.start)
+        .skip(tx_start)
+        .take(tx_end.saturating_sub(tx_start))
         .cloned()
         .collect();
 
@@ -140,6 +142,8 @@ where
     let cumulative_gas_used = receipts.last().map(|r| r.cumulative_gas_used()).unwrap_or(0);
 
     // Requests are only collected if this is the last subblock
+    // Last subblock must include post-execution (BAL index tx_count + 1)
+    let is_last = bal_range.end > tx_count as u64;
     let requests = if is_last { output.requests.clone() } else { Default::default() };
 
     Ok(SubblockOutput { receipts, logs_bloom, requests, cumulative_gas_used })

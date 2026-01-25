@@ -22,14 +22,13 @@ pub struct SubblockInput {
     pub witness: ExecutionWitness,
     /// Block Access List for the entire block.
     pub bal: Arc<Bal>,
-    /// Transaction range to execute: `[start_tx_index, end_tx_index)`.
-    pub tx_range: Range<usize>,
+    /// BAL index range per EIP-7928.
+    /// - Index 0 = pre-execution system calls (beacon root, blockhashes)
+    /// - Index 1..n = transactions (tx i-1 at index i)
+    /// - Index n+1 = post-execution (withdrawals)
+    pub bal_range: Range<u64>,
     /// Chain config for fork rules.
     pub chain_config: ChainConfig,
-    /// Whether this is the first subblock (runs pre-block logic).
-    pub is_first: bool,
-    /// Whether this is the last subblock (runs post-block logic).
-    pub is_last: bool,
 }
 
 /// Output committed by the worker (lightweight - no intermediate state roots).
@@ -60,6 +59,7 @@ pub struct AggregationInput<R = Receipt> {
     pub chain_config: ChainConfig,
     /// Subblock outputs (in order), verified by ZK proofs.
     pub subblock_outputs: Vec<SubblockOutput<R>>,
-    /// The tx ranges each subblock covered (for verification).
-    pub tx_ranges: Vec<Range<usize>>,
+    /// The BAL ranges each subblock covered (for verification).
+    /// Uses EIP-7928 BAL index semantics.
+    pub bal_ranges: Vec<Range<u64>>,
 }
