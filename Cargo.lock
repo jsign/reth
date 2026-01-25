@@ -10823,6 +10823,7 @@ dependencies = [
  "alloy-consensus",
  "alloy-eip7928",
  "alloy-eips",
+ "alloy-evm",
  "alloy-genesis",
  "alloy-primitives",
  "alloy-rlp",
