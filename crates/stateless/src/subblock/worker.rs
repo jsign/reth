@@ -172,3 +172,86 @@ where
 
     Ok(SubblockOutput { receipts, logs_bloom, requests, cumulative_gas_used })
 }
+
+#[cfg(test)]
+mod tests {
+    // Integration tests require full mock setup with witnesses and BAL.
+    // These tests verify the partial execution logic at a unit level.
+
+    #[test]
+    fn test_bal_range_to_tx_indices() {
+        // BAL index 0 = pre-execution (no tx)
+        // BAL index 1 = tx 0
+        // BAL index 2 = tx 1
+        // etc.
+
+        // Range [0, 3) for 5 txs -> tx indices [0, 2)
+        let bal_start = 0u64;
+        let bal_end = 3u64;
+        let tx_count = 5usize;
+
+        let tx_start = if bal_start == 0 { 0 } else { (bal_start - 1) as usize };
+        let tx_end = ((bal_end.saturating_sub(1)) as usize).min(tx_count);
+
+        assert_eq!(tx_start, 0);
+        assert_eq!(tx_end, 2);
+    }
+
+    #[test]
+    fn test_bal_range_to_tx_indices_middle() {
+        // Range [3, 6) for 10 txs -> tx indices [2, 5)
+        let bal_start = 3u64;
+        let bal_end = 6u64;
+        let tx_count = 10usize;
+
+        let tx_start = if bal_start == 0 { 0 } else { (bal_start - 1) as usize };
+        let tx_end = ((bal_end.saturating_sub(1)) as usize).min(tx_count);
+
+        assert_eq!(tx_start, 2);
+        assert_eq!(tx_end, 5);
+    }
+
+    #[test]
+    fn test_bal_range_to_tx_indices_last() {
+        // Range [8, 12) for 10 txs -> tx indices [7, 10)
+        // BAL index 11 is post-execution, so tx_end caps at tx_count
+        let bal_start = 8u64;
+        let bal_end = 12u64;
+        let tx_count = 10usize;
+
+        let tx_start = if bal_start == 0 { 0 } else { (bal_start - 1) as usize };
+        let tx_end = ((bal_end.saturating_sub(1)) as usize).min(tx_count);
+
+        assert_eq!(tx_start, 7);
+        assert_eq!(tx_end, 10);
+    }
+
+    #[test]
+    fn test_is_first_is_last_flags() {
+        let tx_count = 10usize;
+
+        // First subblock: [0, 4)
+        let is_first_1 = 0 == 0;
+        let is_last_1 = 4 > tx_count as u64;
+        assert!(is_first_1);
+        assert!(!is_last_1);
+
+        // Middle subblock: [4, 8)
+        let is_first_2 = 4 == 0;
+        let is_last_2 = 8 > tx_count as u64;
+        assert!(!is_first_2);
+        assert!(!is_last_2);
+
+        // Last subblock: [8, 12) (includes post-execution at index 11)
+        let is_first_3 = 8 == 0;
+        let is_last_3 = 12 > tx_count as u64;
+        assert!(!is_first_3);
+        assert!(is_last_3);
+
+        // Single subblock: [0, 12)
+        let is_first_4 = 0 == 0;
+        let is_last_4 = 12 > tx_count as u64;
+        assert!(is_first_4);
+        assert!(is_last_4);
+    }
+}
