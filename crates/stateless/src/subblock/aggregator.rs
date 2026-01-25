@@ -115,12 +115,11 @@ where
     let (mut trie, _bytecode) = StatelessSparseTrie::new(&witness, parent.state_root)
         .map_err(AggregationValidationError::StatelessValidation)?;
 
-    // BAL index for post-block state:
-    // Index 0 = pre-execution
-    // Index 1 = after pre-block system calls
-    // Index 2..n+1 = after each tx
-    // Index n+2 = after post-block (withdrawals, etc.)
-    let final_bal_index = (tx_count + 2) as u64;
+    // BAL index semantics per EIP-7928:
+    // - Index 0 = pre-execution system contract calls (beacon root, blockhashes)
+    // - Index 1..n = individual transactions (tx 0 at index 1, tx 1 at index 2, ...)
+    // - Index n+1 = post-execution (withdrawals)
+    let final_bal_index = (tx_count + 1) as u64;
 
     // Use the trie as the pre-state provider to look up unchanged account fields
     let hashed_post_state = bal_to_hashed_post_state(&bal, final_bal_index, &trie)

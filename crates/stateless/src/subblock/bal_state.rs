@@ -33,8 +33,8 @@ pub trait PreStateAccountProvider {
 /// # Arguments
 ///
 /// * `bal` - The Block Access List containing all state changes
-/// * `bal_index` - The BAL index to read final values from (typically `num_transactions` + 2 for
-///   post-block)
+/// * `bal_index` - The BAL index to read final values from (typically `num_transactions + 1` for
+///   post-execution per EIP-7928)
 ///
 /// # Returns
 ///
@@ -42,14 +42,12 @@ pub trait PreStateAccountProvider {
 ///
 /// # Note
 ///
-/// The BAL index semantics:
-/// - Index 0 = pre-execution state (reads at 0 return None)
-/// - Index 1 = after pre-block system calls
-/// - Index 2..n+1 = after each transaction (n transactions)
-/// - Index n+2 = after post-block processing
+/// BAL index semantics per EIP-7928:
+/// - Index 0 = pre-execution system contract calls (beacon root, blockhashes)
+/// - Index 1..n = individual transactions (tx 0 at index 1, tx 1 at index 2, ...)
+/// - Index n+1 = post-execution (withdrawals)
 ///
-/// To get the final state, use `bal_index = num_transactions + 2` (or any index larger than
-/// the last write index).
+/// To get the final state, use `bal_index = num_transactions + 1`.
 pub fn bal_to_hashed_post_state<P>(
     bal: &Bal,
     bal_index: u64,

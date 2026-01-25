@@ -88,31 +88,26 @@ where
         child_header = parent_header;
     }
 
-    // Calculate starting BAL index:
-    // - BAL index 0 = pre-execution state
-    // - BAL index 1 = after pre-block system calls (beacon root, blockhashes)
-    // - BAL index 2+ = after tx 0, 1, ...
-    // So for tx_range.start, we need BAL index = tx_range.start + 1 (if first) or tx_range.start +
-    // 1 Actually: if is_first, we start at index 0 and bump after pre-block logic
-    // If not is_first, we start at index tx_range.start + 1 (pre-block + previous txs)
+    // BAL index semantics per EIP-7928:
+    // - Index 0 = pre-execution system contract calls (beacon root, blockhashes)
+    // - Index 1..n = individual transactions (tx 0 at index 1, tx 1 at index 2, ...)
+    // - Index n+1 = post-execution (withdrawals)
+    //
+    // If is_first, we start at index 0 (pre-execution system calls).
+    // Otherwise, we start at tx_range.start + 1 (the index for that transaction).
     let start_bal_index = if is_first {
-        0 // Will be bumped after pre-block logic
+        0
     } else {
-        // Account for pre-block system calls (index 1) plus all previous transactions
         (tx_range.start + 1) as u64
     };
 
     // Create BAL-aware database
-    let mut db = BalWitnessDatabase::new(&trie, bytecode, ancestor_hashes, bal, start_bal_index);
+    let db = BalWitnessDatabase::new(&trie, bytecode, ancestor_hashes, bal, start_bal_index);
 
     // Pre-block logic (if first subblock)
-    if is_first {
-        // Pre-block system calls happen at BAL index 0, then we bump to index 1
-        // The actual pre-block calls are handled by the executor, but we need to
-        // account for them in the BAL index.
-        // After pre-block, bump to index 1
-        db.bump_bal_index();
-    }
+    // Pre-execution system calls (beacon root, blockhashes) happen at BAL index 0.
+    // The executor handles the actual calls and BAL index bumping internally.
+    // After pre-execution, index becomes 1 (ready for tx 0).
 
     // Execute transactions in range
     // Note: We create a partial block view for the executor containing only our tx range
