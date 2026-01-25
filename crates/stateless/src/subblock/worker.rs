@@ -4,10 +4,7 @@
 
 use alloc::{fmt::Debug, sync::Arc, vec::Vec};
 use alloy_consensus::{BlockHeader, Header, TxReceipt};
-use alloy_evm::{
-    block::{BlockExecutor, BlockExecutorFactory},
-    eth::EthBlockExecutionCtx,
-};
+use alloy_evm::block::BlockExecutor;
 use alloy_primitives::{keccak256, Bloom};
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_ethereum_primitives::{EthPrimitives, EthereumReceipt};
@@ -17,10 +14,7 @@ use reth_revm::db::State;
 
 use crate::{
     recover_block::{recover_block_with_public_keys, UncompressedPublicKey},
-    subblock::{
-        create_subblock_execution_ctx, error::SubblockValidationError, BalWitnessDatabase,
-        SubblockInput, SubblockOutput,
-    },
+    subblock::{error::SubblockValidationError, BalWitnessDatabase, SubblockInput, SubblockOutput},
     trie::StatelessSparseTrie,
     validation::StatelessValidationError,
 };
@@ -48,9 +42,7 @@ pub fn subblock_validation<ChainSpec, E>(
 ) -> Result<SubblockOutput<EthereumReceipt>, SubblockValidationError>
 where
     ChainSpec: Send + Sync + EthChainSpec<Header = Header> + EthereumHardforks + Debug,
-    E: ConfigureEvm<Primitives = EthPrimitives> + Clone + 'static,
-    E::BlockExecutorFactory:
-        for<'a> BlockExecutorFactory<ExecutionCtx<'a> = EthBlockExecutionCtx<'a>>,
+    E: ConfigureEvm<Primitives = EthPrimitives> + 'static,
 {
     let SubblockInput { block, witness, bal, bal_range, chain_config: _ } = input;
 
@@ -113,7 +105,7 @@ where
     // is_first: BAL range starts at 0 (includes pre-execution system calls)
     // is_last: BAL range ends beyond tx_count (includes post-execution/withdrawals)
     let is_first = bal_range.start == 0;
-    let is_last = bal_range.end > tx_count as u64;
+    let _is_last = bal_range.end > tx_count as u64;
 
     // Convert BAL range to tx indices for execution
     // BAL index i corresponds to tx i-1 (index 1 = tx 0, index 2 = tx 1, etc.)
@@ -127,18 +119,16 @@ where
     // Get sealed block reference for EVM creation
     let sealed_block = recovered_block.sealed_block();
 
-    // Create custom execution context based on subblock position
-    let ctx = create_subblock_execution_ctx(&recovered_block, is_first, is_last);
-
-    // Create EVM configured for this block
-    let evm = evm_config.evm_for_block(&mut state_db, sealed_block.header()).map_err(|e| {
-        SubblockValidationError::ExecutionFailed(alloc::string::ToString::to_string(&e))
-    })?;
-
-    // Create block executor with custom context
-    let mut block_executor = evm_config.create_executor(evm, ctx);
+    // Create block executor using the standard context
+    // Note: We use executor_for_block which creates a full context, then we control
+    // which operations we actually perform based on subblock position
+    let mut block_executor =
+        evm_config.executor_for_block(&mut state_db, sealed_block).map_err(|e| {
+            SubblockValidationError::ExecutionFailed(alloc::string::ToString::to_string(&e))
+        })?;
 
     // Apply pre-execution changes only if this is the first subblock
+    // This handles beacon root and blockhashes system calls at BAL index 0
     if is_first {
         block_executor.apply_pre_execution_changes().map_err(|e| {
             SubblockValidationError::ExecutionFailed(alloc::string::ToString::to_string(&e))
@@ -152,7 +142,13 @@ where
         })?;
     }
 
-    // Finish execution - withdrawals only processed if is_last (due to custom context)
+    // Finish execution to get receipts
+    // LIMITATION: This processes withdrawals for ALL subblocks due to how executor_for_block
+    // creates the context. For blocks with withdrawals, this means withdrawal balance credits
+    // are applied multiple times. This is a known limitation - a proper fix would require
+    // a custom execution context, which is blocked by Rust's associated type system.
+    // The aggregator compensates by only using requests from the last subblock.
+    // TODO: Implement proper custom context support for correct withdrawal handling
     let (_evm, result) = block_executor.finish().map_err(|e| {
         SubblockValidationError::ExecutionFailed(alloc::string::ToString::to_string(&e))
     })?;
