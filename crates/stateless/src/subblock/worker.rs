@@ -4,15 +4,23 @@
 
 use alloc::{fmt::Debug, sync::Arc, vec::Vec};
 use alloy_consensus::{BlockHeader, Header, TxReceipt};
+use alloy_evm::block::BlockExecutor;
 use alloy_primitives::{keccak256, Bloom};
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_ethereum_primitives::{EthPrimitives, EthereumReceipt};
-use reth_evm::{execute::Executor, ConfigureEvm};
+use reth_evm::ConfigureEvm;
 use reth_primitives_traits::SealedHeader;
+use reth_revm::db::State;
 
 use crate::{
     recover_block::{recover_block_with_public_keys, UncompressedPublicKey},
-    subblock::{error::SubblockValidationError, BalWitnessDatabase, SubblockInput, SubblockOutput},
+    subblock::{
+        create_subblock_execution_ctx,
+        error::SubblockValidationError,
+        BalWitnessDatabase,
+        SubblockInput,
+        SubblockOutput,
+    },
     trie::StatelessSparseTrie,
     validation::StatelessValidationError,
 };
