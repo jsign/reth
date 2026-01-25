@@ -42,7 +42,7 @@ where
     /// * `bytecode` - Map of code hashes to bytecode
     /// * `ancestor_hashes` - Map of block numbers to block hashes
     /// * `bal` - The Block Access List for the entire block
-    /// * `start_bal_index` - The BAL index to start at (0 for pre-execution, 1+ for after tx N-1)
+    /// * `start_bal_index` - The BAL index to start at per EIP-7928 (0 for pre-execution, N for tx N-1)
     pub(crate) fn new(
         trie: &'a T,
         bytecode: B256Map<Bytecode>,
