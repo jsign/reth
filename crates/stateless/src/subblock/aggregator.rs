@@ -238,15 +238,28 @@ fn verify_gas_chaining(
 }
 
 /// Combines subblock outputs into final aggregated values.
+///
+/// Adjusts cumulative gas in receipts so they reflect global block position
+/// rather than local subblock position.
 fn combine_subblock_outputs(
     outputs: &[SubblockOutput<EthereumReceipt>],
 ) -> (Vec<EthereumReceipt>, Bloom, Requests) {
     let mut combined_receipts = Vec::new();
     let mut combined_bloom = Bloom::default();
     let mut combined_requests = Requests::default();
+    let mut gas_offset: u64 = 0;
 
     for output in outputs {
-        combined_receipts.extend(output.receipts.iter().cloned());
+        // Adjust cumulative gas for each receipt by adding the offset
+        for receipt in &output.receipts {
+            let mut adjusted_receipt = receipt.clone();
+            adjusted_receipt.cumulative_gas_used += gas_offset;
+            combined_receipts.push(adjusted_receipt);
+        }
+
+        // Update offset for next subblock
+        gas_offset += output.cumulative_gas_used;
+
         combined_bloom.accrue_bloom(&output.logs_bloom);
 
         // Only the last subblock should have requests
@@ -327,5 +340,54 @@ mod tests {
         // Empty block: full range is [0, 2) for pre and post execution
         let ranges: Vec<Range<u64>> = vec![0..2];
         assert!(verify_bal_ranges_complete(&ranges, 0).is_ok());
+    }
+
+    #[test]
+    fn test_combine_subblock_outputs_adjusts_cumulative_gas() {
+        use reth_ethereum_primitives::{EthereumReceipt, TxType};
+
+        // Create mock receipts with LOCAL cumulative gas
+        let receipt1 = EthereumReceipt {
+            tx_type: TxType::Legacy,
+            success: true,
+            cumulative_gas_used: 21000, // First tx uses 21000
+            logs: vec![],
+        };
+        let receipt2 = EthereumReceipt {
+            tx_type: TxType::Legacy,
+            success: true,
+            cumulative_gas_used: 42000, // Second tx uses 21000 more (local cumulative = 42000)
+            logs: vec![],
+        };
+        let receipt3 = EthereumReceipt {
+            tx_type: TxType::Legacy,
+            success: true,
+            cumulative_gas_used: 30000, // Third tx in second subblock (local cumulative = 30000)
+            logs: vec![],
+        };
+
+        let output1 = SubblockOutput {
+            receipts: vec![receipt1, receipt2],
+            logs_bloom: Bloom::default(),
+            requests: Requests::default(),
+            cumulative_gas_used: 42000, // End gas of subblock 1
+        };
+        let output2 = SubblockOutput {
+            receipts: vec![receipt3],
+            logs_bloom: Bloom::default(),
+            requests: Requests::default(),
+            cumulative_gas_used: 30000, // End gas of subblock 2 (local)
+        };
+
+        let (combined, _, _) = combine_subblock_outputs(&[output1, output2]);
+
+        // After adjustment:
+        // - Receipt 1: 21000 (no offset)
+        // - Receipt 2: 42000 (no offset)
+        // - Receipt 3: 42000 + 30000 = 72000 (offset by subblock 1's end gas)
+        assert_eq!(combined.len(), 3);
+        assert_eq!(combined[0].cumulative_gas_used, 21000);
+        assert_eq!(combined[1].cumulative_gas_used, 42000);
+        assert_eq!(combined[2].cumulative_gas_used, 72000);
     }
 }
