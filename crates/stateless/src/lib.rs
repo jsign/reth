@@ -38,6 +38,8 @@ extern crate alloc;
 // Silence unused crate warnings - these are used in submodules but not directly in lib.rs
 use alloy_eip7928 as _;
 use alloy_evm as _;
+use reth_ethereum_forks as _;
+use reth_evm_ethereum as _;
 
 mod recover_block;
 /// Sparse trie implementation for stateless validation
@@ -67,8 +69,9 @@ pub use alloy_genesis::Genesis;
 
 // Subblock proving re-exports
 pub use subblock::{
-    aggregation_validation, bal_to_hashed_post_state, subblock_validation, AggregationInput,
-    AggregationValidationError, SubblockInput, SubblockOutput, SubblockValidationError,
+    aggregation_validation, bal_to_hashed_post_state, create_subblock_execution_ctx,
+    subblock_validation, AggregationInput, AggregationValidationError, SubblockInput,
+    SubblockOutput, SubblockValidationError,
 };
 
 use reth_ethereum_primitives::Block;
