@@ -48,7 +48,7 @@ pub fn aggregation_validation<ChainSpec>(
 where
     ChainSpec: Send + Sync + EthChainSpec<Header = Header> + EthereumHardforks + Debug,
 {
-    let AggregationInput { block, witness, bal, chain_config: _, subblock_outputs, tx_ranges } =
+    let AggregationInput { block, witness, bal, chain_config: _, subblock_outputs, bal_ranges } =
         input;
 
     // Validate we have outputs
@@ -57,20 +57,20 @@ where
     }
 
     // Validate outputs and ranges match
-    if subblock_outputs.len() != tx_ranges.len() {
+    if subblock_outputs.len() != bal_ranges.len() {
         return Err(AggregationValidationError::MismatchedOutputsAndRanges {
             outputs: subblock_outputs.len(),
-            ranges: tx_ranges.len(),
+            ranges: bal_ranges.len(),
         });
     }
 
     let tx_count = block.body.transactions.len();
 
-    // Verify ranges are complete and contiguous
-    verify_ranges_complete(&tx_ranges, tx_count)?;
+    // Verify BAL ranges are complete and contiguous
+    verify_bal_ranges_complete(&bal_ranges, tx_count)?;
 
     // Verify gas chaining
-    verify_gas_chaining(&subblock_outputs, &tx_ranges)?;
+    verify_gas_chaining(&subblock_outputs, &bal_ranges)?;
 
     // Recover signers (for block hash computation)
     let recovered_block = recover_block_with_public_keys(block.clone(), public_keys, &*chain_spec)
@@ -143,41 +143,57 @@ where
     Ok(recovered_block.hash_slow())
 }
 
-/// Verifies that transaction ranges are complete and contiguous.
-fn verify_ranges_complete(
-    tx_ranges: &[Range<usize>],
+/// Verifies that BAL ranges are complete and contiguous.
+///
+/// BAL index semantics per EIP-7928:
+/// - Index 0 = pre-execution system calls
+/// - Index 1..n = transactions (tx i-1 at index i)
+/// - Index n+1 = post-execution (withdrawals)
+///
+/// For a complete block, ranges must cover `[0, tx_count + 2)`.
+fn verify_bal_ranges_complete(
+    bal_ranges: &[Range<u64>],
     tx_count: usize,
 ) -> Result<(), AggregationValidationError> {
-    if tx_ranges.is_empty() {
+    // Full BAL range is [0, tx_count + 2) to cover pre-execution, all txs, and post-execution
+    let max_bal_index = (tx_count + 2) as u64;
+
+    if bal_ranges.is_empty() {
         if tx_count == 0 {
-            return Ok(());
+            // Empty block still needs pre/post execution coverage
+            return Err(AggregationValidationError::IncompleteRanges { covered: 0, tx_count });
         }
         return Err(AggregationValidationError::IncompleteRanges { covered: 0, tx_count });
     }
 
-    // First range must start at 0
-    if tx_ranges[0].start != 0 {
+    // First range must start at 0 (pre-execution)
+    if bal_ranges[0].start != 0 {
         return Err(AggregationValidationError::RangesNotStartingAtZero {
-            start: tx_ranges[0].start,
+            start: bal_ranges[0].start as usize,
         });
     }
 
     // Check contiguity
-    for i in 0..tx_ranges.len() - 1 {
-        if tx_ranges[i].end != tx_ranges[i + 1].start {
+    for i in 0..bal_ranges.len() - 1 {
+        if bal_ranges[i].end != bal_ranges[i + 1].start {
             return Err(AggregationValidationError::NonContiguousRanges {
                 index: i,
-                end: tx_ranges[i].end,
+                end: bal_ranges[i].end as usize,
                 next_index: i + 1,
-                start: tx_ranges[i + 1].start,
+                start: bal_ranges[i + 1].start as usize,
             });
         }
     }
 
-    // Last range must end at tx_count
-    let last_end = tx_ranges.last().map(|r| r.end).unwrap_or(0);
-    if last_end != tx_count {
-        return Err(AggregationValidationError::IncompleteRanges { covered: last_end, tx_count });
+    // Last range must end at max_bal_index (covers post-execution)
+    let last_end = bal_ranges.last().map(|r| r.end).unwrap_or(0);
+    if last_end != max_bal_index {
+        // Report in terms of tx coverage for user-friendly error
+        let covered_txs = last_end.saturating_sub(1) as usize;
+        return Err(AggregationValidationError::IncompleteRanges {
+            covered: covered_txs.min(tx_count),
+            tx_count,
+        });
     }
 
     Ok(())
@@ -189,7 +205,7 @@ fn verify_ranges_complete(
 /// cumulative gas at end.
 fn verify_gas_chaining(
     outputs: &[SubblockOutput<EthereumReceipt>],
-    tx_ranges: &[Range<usize>],
+    bal_ranges: &[Range<u64>],
 ) -> Result<(), AggregationValidationError> {
     // First subblock starts with 0 gas
     // Subsequent subblocks should have receipts that reflect proper cumulative gas
@@ -208,7 +224,7 @@ fn verify_gas_chaining(
 
             // The first receipt's cumulative gas should be > prev_gas
             // (it includes prev_gas + this tx's gas)
-            if first_receipt_gas < prev_gas && !tx_ranges[i].is_empty() {
+            if first_receipt_gas < prev_gas && !bal_ranges[i].is_empty() {
                 return Err(AggregationValidationError::GasChainingMismatch {
                     index: i - 1,
                     expected: prev_gas,
@@ -247,42 +263,69 @@ mod tests {
     use super::*;
     use alloc::vec;
 
+    // BAL index semantics for 10 txs:
+    // - Index 0 = pre-execution
+    // - Index 1-10 = transactions 0-9
+    // - Index 11 = post-execution
+    // - Full range is [0, 12)
+
     #[test]
-    fn test_verify_ranges_complete_valid() {
-        let ranges = vec![0..2, 2..5, 5..10];
-        assert!(verify_ranges_complete(&ranges, 10).is_ok());
+    fn test_verify_bal_ranges_complete_valid() {
+        // 10 txs: full range is [0, 12)
+        let ranges: Vec<Range<u64>> = vec![0..4, 4..8, 8..12];
+        assert!(verify_bal_ranges_complete(&ranges, 10).is_ok());
     }
 
     #[test]
-    fn test_verify_ranges_complete_empty_block() {
-        let ranges: Vec<Range<usize>> = vec![];
-        assert!(verify_ranges_complete(&ranges, 0).is_ok());
+    fn test_verify_bal_ranges_complete_single_range() {
+        // Single range covering entire block
+        let ranges: Vec<Range<u64>> = vec![0..12];
+        assert!(verify_bal_ranges_complete(&ranges, 10).is_ok());
     }
 
     #[test]
-    fn test_verify_ranges_not_starting_at_zero() {
-        let ranges = vec![1..5, 5..10];
+    fn test_verify_bal_ranges_not_starting_at_zero() {
+        let ranges: Vec<Range<u64>> = vec![1..6, 6..12];
         assert!(matches!(
-            verify_ranges_complete(&ranges, 10),
+            verify_bal_ranges_complete(&ranges, 10),
             Err(AggregationValidationError::RangesNotStartingAtZero { start: 1 })
         ));
     }
 
     #[test]
-    fn test_verify_ranges_non_contiguous() {
-        let ranges = vec![0..3, 4..10];
+    fn test_verify_bal_ranges_non_contiguous() {
+        let ranges: Vec<Range<u64>> = vec![0..3, 4..12];
         assert!(matches!(
-            verify_ranges_complete(&ranges, 10),
+            verify_bal_ranges_complete(&ranges, 10),
             Err(AggregationValidationError::NonContiguousRanges { .. })
         ));
     }
 
     #[test]
-    fn test_verify_ranges_incomplete() {
-        let ranges = vec![0..5];
+    fn test_verify_bal_ranges_incomplete() {
+        // Range ends at 5, which covers pre-execution (0) and txs 0-3 (indices 1-4)
+        // Expected covered: min(5-1, 10) = 4 txs
+        let ranges: Vec<Range<u64>> = vec![0..5];
         assert!(matches!(
-            verify_ranges_complete(&ranges, 10),
-            Err(AggregationValidationError::IncompleteRanges { covered: 5, tx_count: 10 })
+            verify_bal_ranges_complete(&ranges, 10),
+            Err(AggregationValidationError::IncompleteRanges { covered: 4, tx_count: 10 })
         ));
+    }
+
+    #[test]
+    fn test_verify_bal_ranges_empty_block_needs_coverage() {
+        // Even an empty block needs at least [0, 2) for pre and post execution
+        let ranges: Vec<Range<u64>> = vec![];
+        assert!(matches!(
+            verify_bal_ranges_complete(&ranges, 0),
+            Err(AggregationValidationError::IncompleteRanges { .. })
+        ));
+    }
+
+    #[test]
+    fn test_verify_bal_ranges_empty_block_valid() {
+        // Empty block: full range is [0, 2) for pre and post execution
+        let ranges: Vec<Range<u64>> = vec![0..2];
+        assert!(verify_bal_ranges_complete(&ranges, 0).is_ok());
     }
 }
