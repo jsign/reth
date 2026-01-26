@@ -13,7 +13,6 @@ use reth_primitives_traits::RecoveredBlock;
 /// - Middle subblocks: Neither pre nor post execution
 pub fn create_subblock_execution_ctx<'a>(
     block: &'a RecoveredBlock<Block>,
-    _is_first: bool,
     is_last: bool,
 ) -> EthBlockExecutionCtx<'a> {
     EthBlockExecutionCtx {
@@ -57,7 +56,7 @@ mod tests {
     #[test]
     fn test_first_subblock_ctx_has_beacon_root() {
         let block = mock_recovered_block(true);
-        let ctx = create_subblock_execution_ctx(&block, true, false);
+        let ctx = create_subblock_execution_ctx(&block, false);
 
         assert!(ctx.parent_beacon_block_root.is_some());
         assert!(ctx.withdrawals.is_none()); // Not last
@@ -66,7 +65,7 @@ mod tests {
     #[test]
     fn test_last_subblock_ctx_has_withdrawals() {
         let block = mock_recovered_block(true);
-        let ctx = create_subblock_execution_ctx(&block, false, true);
+        let ctx = create_subblock_execution_ctx(&block, true);
 
         assert!(ctx.withdrawals.is_some());
     }
@@ -74,7 +73,7 @@ mod tests {
     #[test]
     fn test_middle_subblock_ctx_has_neither() {
         let block = mock_recovered_block(true);
-        let ctx = create_subblock_execution_ctx(&block, false, false);
+        let ctx = create_subblock_execution_ctx(&block, false);
 
         assert!(ctx.withdrawals.is_none());
     }
@@ -82,7 +81,7 @@ mod tests {
     #[test]
     fn test_single_subblock_ctx_has_both() {
         let block = mock_recovered_block(true);
-        let ctx = create_subblock_execution_ctx(&block, true, true);
+        let ctx = create_subblock_execution_ctx(&block, true);
 
         assert!(ctx.parent_beacon_block_root.is_some());
         assert!(ctx.withdrawals.is_some());

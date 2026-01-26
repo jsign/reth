@@ -151,7 +151,7 @@ where
     // Create custom execution context with proper withdrawal handling:
     // - Non-last subblocks have withdrawals=None to skip withdrawal processing
     // - Only the last subblock processes withdrawals
-    let ctx = create_subblock_execution_ctx(&recovered_block, is_first, is_last);
+    let ctx = create_subblock_execution_ctx(&recovered_block, is_last);
 
     // Create executor with our custom context
     let mut block_executor = evm_config.create_executor(evm, ctx);
@@ -173,7 +173,7 @@ where
 
     // Finish execution to get receipts
     // Withdrawals are only processed if is_last=true (context has withdrawals=Some)
-    let (_evm, result) = block_executor.finish().map_err(|e| {
+    let result = block_executor.apply_post_execution_changes().map_err(|e| {
         SubblockValidationError::ExecutionFailed(alloc::string::ToString::to_string(&e))
     })?;
 
