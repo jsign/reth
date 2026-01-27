@@ -3310,6 +3310,7 @@ name = "ef-tests"
 version = "1.10.2"
 dependencies = [
  "alloy-consensus",
+ "alloy-eip7928",
  "alloy-eips",
  "alloy-genesis",
  "alloy-primitives",
@@ -3332,6 +3333,7 @@ dependencies = [
  "reth-trie",
  "reth-trie-db",
  "revm",
+ "revm-state",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

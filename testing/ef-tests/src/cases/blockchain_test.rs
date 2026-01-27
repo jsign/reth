@@ -21,11 +21,12 @@ use reth_provider::{
 };
 use reth_revm::{database::StateProviderDatabase, witness::ExecutionWitnessRecord, State};
 use reth_stateless::{
-    trie::StatelessSparseTrie, validation::stateless_validation_with_trie, ExecutionWitness,
-    UncompressedPublicKey,
+    subblock_validation, trie::StatelessSparseTrie, validation::stateless_validation_with_trie,
+    ExecutionWitness, SubblockInput, UncompressedPublicKey,
 };
 use reth_trie::{HashedPostState, KeccakKeyHasher, StateRoot};
 use reth_trie_db::DatabaseStateRoot;
+use revm_state::bal::Bal;
 use std::{
     collections::BTreeMap,
     fs,
@@ -389,6 +390,16 @@ fn run_case(
         .expect("stateless validation failed");
     }
 
+    // Run subblock validation for blocks with BAL data (EIP-7928)
+    for (block_index, (recovered_block, execution_witness)) in program_inputs.iter().enumerate() {
+        // Get BAL from the test case block if present
+        if let Some(alloy_bal) =
+            case.blocks.get(block_index).and_then(|b| b.block_access_list.clone())
+        {
+            run_subblock_validation(recovered_block, execution_witness, alloy_bal, &chain_spec)?;
+        }
+    }
+
     Ok(program_inputs)
 }
 
@@ -527,4 +538,52 @@ fn execution_witness_with_parent(parent: &RecoveredBlock<Block>) -> ExecutionWit
     let mut serialized_header = Vec::new();
     parent.header().encode(&mut serialized_header);
     ExecutionWitness { headers: vec![serialized_header.into()], ..Default::default() }
+}
+
+/// Runs subblock validation for a block with BAL data.
+///
+/// This tests the subblock proving implementation by executing the full block
+/// as a single subblock (BAL range `[0, tx_count+2)`).
+fn run_subblock_validation(
+    recovered_block: &RecoveredBlock<Block>,
+    execution_witness: &ExecutionWitness,
+    alloy_bal: alloy_eip7928::BlockAccessList,
+    chain_spec: &Arc<ChainSpec>,
+) -> Result<(), Error> {
+    // Convert alloy BAL to revm BAL
+    let bal: Bal = alloy_bal
+        .try_into()
+        .map_err(|e| Error::Assertion(format!("Failed to convert BAL: {e:?}")))?;
+
+    // Get block and transaction count
+    let block = recovered_block.clone().into_block();
+    let tx_count = block.body.transactions.len();
+
+    // Full BAL range covers: pre-execution (0), all txs (1..tx_count), post-execution (tx_count+1)
+    // So the range is [0, tx_count+2)
+    let bal_range = 0..(tx_count as u64 + 2);
+
+    // Recover public keys from transaction signatures
+    let public_keys = recover_signers(block.body().transactions())
+        .map_err(|e| Error::Assertion(format!("Failed to recover signers: {e}")))?;
+
+    // Create subblock input
+    let input = SubblockInput {
+        block,
+        witness: execution_witness.clone(),
+        bal: Arc::new(bal),
+        bal_range,
+        chain_config: Default::default(), // Not used in validation
+    };
+
+    // Run subblock validation
+    subblock_validation(
+        input,
+        public_keys,
+        chain_spec.clone(),
+        EthEvmConfig::new(chain_spec.clone()),
+    )
+    .map_err(|e| Error::Assertion(format!("Subblock validation failed: {e:?}")))?;
+
+    Ok(())
 }

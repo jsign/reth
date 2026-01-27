@@ -39,6 +39,8 @@ alloy-primitives.workspace = true
 alloy-eips.workspace = true
 alloy-consensus.workspace = true
 alloy-genesis.workspace = true
+alloy-eip7928 = { workspace = true, features = ["serde"] }
+revm-state = { workspace = true, features = ["serde"] }
 
 walkdir.workspace = true
 serde.workspace = true
