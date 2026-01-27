@@ -28,6 +28,7 @@ pub fn create_subblock_execution_ctx<'a>(
             None
         },
         extra_data: block.header().extra_data().clone(),
+        slot_number: block.header().slot_number(),
     }
 }
 
