@@ -165,4 +165,17 @@ pub enum AggregationValidationError {
         /// Expected state root from block header.
         expected: B256,
     },
+
+    /// Block access list hash missing from header (required post-Amsterdam).
+    #[error("block access list hash missing from header")]
+    MissingBlockAccessListHash,
+
+    /// Block access list hash mismatch.
+    #[error("BAL hash mismatch: computed {computed}, expected {expected}")]
+    BalHashMismatch {
+        /// Computed hash from provided BAL.
+        computed: B256,
+        /// Expected hash from block header.
+        expected: B256,
+    },
 }
