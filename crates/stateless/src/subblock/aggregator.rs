@@ -139,7 +139,7 @@ where
     // - Index 0 = pre-execution system contract calls (beacon root, blockhashes)
     // - Index 1..n = individual transactions (tx 0 at index 1, tx 1 at index 2, ...)
     // - Index n+1 = post-execution (withdrawals)
-    let final_bal_index = (tx_count + 1) as u64;
+    let final_bal_index = (tx_count + 2) as u64;
 
     // Use the trie as the pre-state provider to look up unchanged account fields
     let hashed_post_state = bal_to_hashed_post_state(&bal, final_bal_index, &trie)

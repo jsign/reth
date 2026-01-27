@@ -47,7 +47,7 @@ pub trait PreStateAccountProvider {
 /// - Index 1..n = individual transactions (tx 0 at index 1, tx 1 at index 2, ...)
 /// - Index n+1 = post-execution (withdrawals)
 ///
-/// To get the final state, use `bal_index = num_transactions + 1`.
+/// To get the final state, use `bal_index = num_transactions + 2`.
 pub fn bal_to_hashed_post_state<P>(
     bal: &Bal,
     bal_index: u64,
@@ -70,8 +70,22 @@ where
         // Check if there are any account info changes
         let has_account_changes = nonce.is_some() || balance.is_some() || code.is_some();
 
-        if has_account_changes {
-            // Query pre-state only if we need fallback values
+        // Process storage changes first to check if we have any
+        let mut storage_changes: Vec<(B256, U256)> = Vec::new();
+
+        for (slot, slot_writes) in &account_bal.storage.storage {
+            if let Some(value) = slot_writes.get(bal_index) {
+                let hashed_slot = keccak256(B256::from(*slot));
+                storage_changes.push((hashed_slot, value));
+            }
+        }
+
+        let has_storage_changes = !storage_changes.is_empty();
+
+        // Include account if it has account info changes OR storage changes.
+        // Storage changes affect the account's storage_root, so the account must be included.
+        if has_account_changes || has_storage_changes {
+            // Query pre-state for any missing account fields
             let pre_state_account = if nonce.is_none() || balance.is_none() || code.is_none() {
                 pre_state.account(*address)?
             } else {
@@ -97,17 +111,7 @@ where
             accounts.insert(hashed_address, Some(account));
         }
 
-        // Process storage changes
-        let mut storage_changes: Vec<(B256, U256)> = Vec::new();
-
-        for (slot, slot_writes) in &account_bal.storage.storage {
-            if let Some(value) = slot_writes.get(bal_index) {
-                let hashed_slot = keccak256(B256::from(*slot));
-                storage_changes.push((hashed_slot, value));
-            }
-        }
-
-        if !storage_changes.is_empty() {
+        if has_storage_changes {
             // wiped = false because we're applying changes, not clearing
             let hashed_storage = HashedStorage::from_iter(false, storage_changes);
             storages.insert(hashed_address, hashed_storage);

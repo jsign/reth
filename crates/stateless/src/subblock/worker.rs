@@ -146,6 +146,10 @@ where
         .with_bal_builder()
         .build();
 
+    // Set the BAL builder index to match the subblock's start index.
+    // This ensures the BAL builder records changes at the correct BAL indices.
+    state_db.set_bal_index(start_bal_index);
+
     // Get sealed block reference for EVM creation
     let sealed_block = recovered_block.sealed_block();
 
@@ -270,25 +274,25 @@ mod tests {
 
         // First subblock: [0, 4)
         let is_first_1 = 0 == 0;
-        let is_last_1 = 4 > tx_count as u64;
+        let is_last_1 = 4 > (tx_count + 1) as u64;
         assert!(is_first_1);
         assert!(!is_last_1);
 
         // Middle subblock: [4, 8)
         let is_first_2 = 4 == 0;
-        let is_last_2 = 8 > tx_count as u64;
+        let is_last_2 = 8 > (tx_count + 1) as u64;
         assert!(!is_first_2);
         assert!(!is_last_2);
 
         // Last subblock: [8, 12) (includes post-execution at index 11)
         let is_first_3 = 8 == 0;
-        let is_last_3 = 12 > tx_count as u64;
+        let is_last_3 = 12 > (tx_count + 1) as u64;
         assert!(!is_first_3);
         assert!(is_last_3);
 
         // Single subblock: [0, 12)
         let is_first_4 = 0 == 0;
-        let is_last_4 = 12 > tx_count as u64;
+        let is_last_4 = 12 > (tx_count + 1) as u64;
         assert!(is_first_4);
         assert!(is_last_4);
     }

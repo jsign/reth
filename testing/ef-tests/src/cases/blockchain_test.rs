@@ -21,8 +21,9 @@ use reth_provider::{
 };
 use reth_revm::{database::StateProviderDatabase, witness::ExecutionWitnessRecord, State};
 use reth_stateless::{
-    subblock_validation, trie::StatelessSparseTrie, validation::stateless_validation_with_trie,
-    ExecutionWitness, SubblockInput, UncompressedPublicKey,
+    aggregation_validation, subblock_validation, trie::StatelessSparseTrie,
+    validation::stateless_validation_with_trie, AggregationInput, ExecutionWitness, SubblockInput,
+    UncompressedPublicKey,
 };
 use reth_trie::{HashedPostState, KeccakKeyHasher, StateRoot};
 use reth_trie_db::DatabaseStateRoot;
@@ -554,36 +555,62 @@ fn run_subblock_validation(
     let bal: Bal = alloy_bal
         .try_into()
         .map_err(|e| Error::Assertion(format!("Failed to convert BAL: {e:?}")))?;
+    let bal = Arc::new(bal);
 
     // Get block and transaction count
     let block = recovered_block.clone().into_block();
     let tx_count = block.body.transactions.len();
 
-    // Full BAL range covers: pre-execution (0), all txs (1..tx_count), post-execution (tx_count+1)
-    // So the range is [0, tx_count+2)
-    let bal_range = 0..(tx_count as u64 + 2);
-
     // Recover public keys from transaction signatures
     let public_keys = recover_signers(block.body().transactions())
         .map_err(|e| Error::Assertion(format!("Failed to recover signers: {e}")))?;
 
-    // Create subblock input
-    let input = SubblockInput {
+    // Define three BAL ranges per EIP-7928:
+    // - Pre-tx-exec: index 0 (pre-execution system calls: beacon root, blockhashes)
+    // - All txs exec: indices 1..tx_count+1 (all transactions)
+    // - Post-tx-exec: index tx_count+1 (post-execution: withdrawals)
+    // TEMP: Using single full range to debug
+    let ranges = vec![
+        0..(tx_count as u64 + 2), // full range
+    ];
+
+    let mut subblock_outputs = Vec::new();
+
+    // Run subblock validation for each range
+    for bal_range in &ranges {
+        let input = SubblockInput {
+            block: block.clone(),
+            witness: execution_witness.clone(),
+            bal: bal.clone(),
+            bal_range: bal_range.clone(),
+            chain_config: Default::default(),
+        };
+
+        let output = subblock_validation(
+            input,
+            public_keys.clone(),
+            chain_spec.clone(),
+            EthEvmConfig::new(chain_spec.clone()),
+        )
+        .map_err(|e| {
+            Error::Assertion(format!("Subblock validation failed for range {bal_range:?}: {e:?}"))
+        })?;
+
+        subblock_outputs.push(output);
+    }
+
+    // Create aggregation input and run aggregation validation
+    let aggregation_input = AggregationInput {
         block,
         witness: execution_witness.clone(),
-        bal: Arc::new(bal),
-        bal_range,
-        chain_config: Default::default(), // Not used in validation
+        bal,
+        chain_config: Default::default(),
+        subblock_outputs,
+        bal_ranges: ranges,
     };
 
-    // Run subblock validation
-    subblock_validation(
-        input,
-        public_keys,
-        chain_spec.clone(),
-        EthEvmConfig::new(chain_spec.clone()),
-    )
-    .map_err(|e| Error::Assertion(format!("Subblock validation failed: {e:?}")))?;
+    aggregation_validation(aggregation_input, public_keys, chain_spec.clone())
+        .map_err(|e| Error::Assertion(format!("Aggregation validation failed: {e:?}")))?;
 
     Ok(())
 }
