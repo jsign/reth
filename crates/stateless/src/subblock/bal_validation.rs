@@ -78,6 +78,10 @@ pub fn validate_subblock_bal(
 }
 
 /// Validates balance changes match between built and provided BAL.
+///
+/// Note: `BalWrites::get(i)` returns the value visible at the START of index `i`,
+/// which is the state AFTER the write at index `i-1`. So to validate a change
+/// at `block_access_index: i` with `post_balance: v`, we check `get(i+1) == Some(v)`.
 fn validate_balance_changes(
     address: Address,
     built_changes: &[alloy_eip7928::BalanceChange],
@@ -92,8 +96,10 @@ fn validate_balance_changes(
             continue;
         }
 
-        // Find the corresponding write in provided BAL
-        let provided_value = provided_writes.get(index);
+        // Check that the post_balance is visible at index+1 (after the change takes effect)
+        // BalWrites::get(i) returns the value visible at the START of index i,
+        // so get(index+1) gives us the value AFTER the change at index.
+        let provided_value = provided_writes.get(index + 1);
 
         if provided_value != Some(change.post_balance) {
             return Err(SubblockValidationError::BalBalanceMismatch {
@@ -121,7 +127,8 @@ fn validate_nonce_changes(
             continue;
         }
 
-        let provided_value = provided_writes.get(index);
+        // Check at index+1 (see validate_balance_changes for explanation)
+        let provided_value = provided_writes.get(index + 1);
 
         if provided_value != Some(change.new_nonce) {
             return Err(SubblockValidationError::BalNonceMismatch {
@@ -155,7 +162,8 @@ fn validate_storage_changes(
                 continue;
             }
 
-            let provided_value = provided_slot_writes.and_then(|w| w.get(index));
+            // Check at index+1 (see validate_balance_changes for explanation)
+            let provided_value = provided_slot_writes.and_then(|w| w.get(index + 1));
 
             if provided_value != Some(change.new_value) {
                 return Err(SubblockValidationError::BalStorageMismatch {
@@ -185,8 +193,8 @@ fn validate_code_changes(
             continue;
         }
 
-        // Get the provided code at this index
-        let provided_code = provided_writes.get(index);
+        // Check at index+1 (see validate_balance_changes for explanation)
+        let provided_code = provided_writes.get(index + 1);
 
         // Compare by checking if the code bytes match
         let matches = provided_code.map_or(false, |(_, bytecode)| {
@@ -254,13 +262,21 @@ mod tests {
         let address = Address::repeat_byte(0x01);
 
         // Create provided BAL with balance write at index 1
+        // This means the value 100 is visible starting at get(2) (after index 1)
         let mut provided = Bal::new();
         let mut account_bal = AccountBal::default();
         account_bal.account_info.balance.force_update(1, U256::from(100));
         provided.accounts.insert(address, account_bal);
         let provided = Arc::new(provided);
 
-        // Create built BAL with matching balance change
+        // Verify our understanding: get(1) returns None, get(2) returns Some(100)
+        let bal_val_at_1 = provided.accounts.get(&address).unwrap().account_info.balance.get(1);
+        let bal_val_at_2 = provided.accounts.get(&address).unwrap().account_info.balance.get(2);
+        assert_eq!(bal_val_at_1, None, "get(1) should return None (value not yet visible)");
+        assert_eq!(bal_val_at_2, Some(U256::from(100)), "get(2) should return Some(100) (visible after change at 1)");
+
+        // Create built BAL with matching balance change at index 1
+        // Validation will check get(1+1) = get(2) which should equal post_balance
         let built = Some(vec![AccountChanges {
             address,
             balance_changes: vec![BalanceChange::new(1, U256::from(100))],

@@ -5,6 +5,7 @@
 
 mod aggregator;
 mod bal_state;
+mod bal_validation;
 mod bal_witness_db;
 mod error;
 mod execution;
@@ -18,4 +19,5 @@ pub use execution::create_subblock_execution_ctx;
 pub use types::{AggregationInput, SubblockInput, SubblockOutput};
 pub use worker::subblock_validation;
 
+pub(crate) use bal_validation::validate_subblock_bal;
 pub(crate) use bal_witness_db::BalWitnessDatabase;
