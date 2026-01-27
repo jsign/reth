@@ -40,8 +40,6 @@ pub struct SubblockOutput<R = alloy_consensus::Receipt> {
     pub logs_bloom: Bloom,
     /// EIP-7685 requests from this range (only populated if `is_last`).
     pub requests: Requests,
-    /// Cumulative gas used at end of range.
-    pub cumulative_gas_used: u64,
 }
 
 /// Input to the master/aggregator guest program.

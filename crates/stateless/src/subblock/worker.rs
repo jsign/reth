@@ -205,15 +205,10 @@ where
         logs_bloom.accrue_bloom(&receipt.bloom());
     }
 
-    // Get cumulative gas used at end of our range
-    // Note: This is LOCAL cumulative gas (starting from 0 for this subblock)
-    // The aggregator will adjust to global cumulative gas
-    let cumulative_gas_used = receipts.last().map(|r| r.cumulative_gas_used()).unwrap_or(0);
-
     // Requests are only populated for the last subblock (withdrawals processed there)
     let requests = result.requests;
 
-    Ok(SubblockOutput { receipts, logs_bloom, requests, cumulative_gas_used })
+    Ok(SubblockOutput { receipts, logs_bloom, requests })
 }
 
 #[cfg(test)]

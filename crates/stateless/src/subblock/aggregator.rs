@@ -275,8 +275,8 @@ fn combine_subblock_outputs(
             combined_receipts.push(adjusted_receipt);
         }
 
-        // Update offset for next subblock
-        gas_offset += output.cumulative_gas_used;
+        // Update offset for next subblock using last receipt's cumulative gas
+        gas_offset += output.receipts.last().map(|r| r.cumulative_gas_used()).unwrap_or(0);
 
         combined_bloom.accrue_bloom(&output.logs_bloom);
 
@@ -388,13 +388,11 @@ mod tests {
             receipts: vec![receipt1, receipt2],
             logs_bloom: Bloom::default(),
             requests: Requests::default(),
-            cumulative_gas_used: 42000, // End gas of subblock 1
         };
         let output2 = SubblockOutput {
             receipts: vec![receipt3],
             logs_bloom: Bloom::default(),
             requests: Requests::default(),
-            cumulative_gas_used: 30000, // End gas of subblock 2 (local)
         };
 
         let (combined, _, _) = combine_subblock_outputs(&[output1, output2]);
@@ -431,13 +429,11 @@ mod tests {
             receipts: vec![receipt1],
             logs_bloom: Bloom::default(),
             requests: Requests::default(),
-            cumulative_gas_used: 42000,
         };
         let output2 = SubblockOutput {
             receipts: vec![receipt2],
             logs_bloom: Bloom::default(),
             requests: Requests::default(),
-            cumulative_gas_used: 21000,
         };
 
         let ranges: Vec<Range<u64>> = vec![0..3, 3..5];
