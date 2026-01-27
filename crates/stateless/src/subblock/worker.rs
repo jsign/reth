@@ -4,7 +4,7 @@
 
 use alloc::{fmt::Debug, sync::Arc, vec::Vec};
 use alloy_consensus::{BlockHeader, Header, TxReceipt};
-use alloy_evm::{block::BlockExecutor, eth::spec::EthExecutorSpec};
+use alloy_evm::{block::BlockExecutor, eth::spec::EthExecutorSpec, Evm};
 use alloy_primitives::{keccak256, Bloom};
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_ethereum_forks::Hardforks;
@@ -17,8 +17,8 @@ use reth_revm::db::State;
 use crate::{
     recover_block::{recover_block_with_public_keys, UncompressedPublicKey},
     subblock::{
-        create_subblock_execution_ctx, error::SubblockValidationError, BalWitnessDatabase,
-        SubblockInput, SubblockOutput,
+        create_subblock_execution_ctx, error::SubblockValidationError, validate_subblock_bal,
+        BalWitnessDatabase, SubblockInput, SubblockOutput,
     },
     trie::StatelessSparseTrie,
     validation::StatelessValidationError,
@@ -122,8 +122,8 @@ where
     // Start BAL index comes directly from the bal_range
     let start_bal_index = bal_range.start;
 
-    // Create BAL-aware database
-    let db = BalWitnessDatabase::new(&trie, bytecode, ancestor_hashes, bal, start_bal_index);
+    // Create BAL-aware database (clone BAL so we keep it for validation later)
+    let db = BalWitnessDatabase::new(&trie, bytecode, ancestor_hashes, bal.clone(), start_bal_index);
 
     // Determine subblock position flags
     // is_first: BAL range starts at 0 (includes pre-execution system calls)
@@ -137,8 +137,13 @@ where
     let tx_end = ((bal_range.end.saturating_sub(1)) as usize).min(tx_count);
 
     // Wrap database in State for executor compatibility
-    let mut state_db =
-        State::builder().with_database(db).with_bundle_update().without_state_clear().build();
+    // Enable BAL builder to track state changes during execution (EIP-7928)
+    let mut state_db = State::builder()
+        .with_database(db)
+        .with_bundle_update()
+        .without_state_clear()
+        .with_bal_builder()
+        .build();
 
     // Get sealed block reference for EVM creation
     let sealed_block = recovered_block.sealed_block();
@@ -162,6 +167,9 @@ where
         block_executor.apply_pre_execution_changes().map_err(|e| {
             SubblockValidationError::ExecutionFailed(alloc::string::ToString::to_string(&e))
         })?;
+
+        // Bump BAL index after pre-execution changes (EIP-7928: index 0 is pre-execution)
+        block_executor.evm_mut().db_mut().bump_bal_index();
     }
 
     // Execute only our transaction range
@@ -169,13 +177,23 @@ where
         block_executor.execute_transaction(tx).map_err(|e| {
             SubblockValidationError::ExecutionFailed(alloc::string::ToString::to_string(&e))
         })?;
+
+        // Bump BAL index after each transaction (EIP-7928)
+        block_executor.evm_mut().db_mut().bump_bal_index();
     }
 
-    // Finish execution to get receipts
+    // Finish execution to get receipts and EVM (for BAL extraction)
     // Withdrawals are only processed if is_last=true (context has withdrawals=Some)
-    let result = block_executor.apply_post_execution_changes().map_err(|e| {
+    let (evm, result) = block_executor.finish().map_err(|e| {
         SubblockValidationError::ExecutionFailed(alloc::string::ToString::to_string(&e))
     })?;
+
+    // Extract state_db from EVM for BAL validation
+    let (state_db, _) = evm.finish();
+
+    // Extract built BAL and validate against provided BAL
+    let built_bal = state_db.take_built_alloy_bal();
+    validate_subblock_bal(&bal, built_bal, &bal_range)?;
 
     // Get receipts directly from result (already contains only our executed txs)
     let receipts: Vec<EthereumReceipt> = result.receipts;
