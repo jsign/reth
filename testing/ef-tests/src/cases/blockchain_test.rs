@@ -565,52 +565,61 @@ fn run_subblock_validation(
     let public_keys = recover_signers(block.body().transactions())
         .map_err(|e| Error::Assertion(format!("Failed to recover signers: {e}")))?;
 
-    // Define three BAL ranges per EIP-7928:
-    // - Pre-tx-exec: index 0 (pre-execution system calls: beacon root, blockhashes)
-    // - All txs exec: indices 1..tx_count+1 (all transactions)
-    // - Post-tx-exec: index tx_count+1 (post-execution: withdrawals)
-    // TEMP: Using single full range to debug
-    let ranges = vec![
-        0..(tx_count as u64 + 2), // full range
+    // Test different BAL range partitioning strategies:
+    let test_cases = vec![
+        ("single", vec![0..(tx_count as u64 + 2)]),
+        (
+            "pre, all-txs, post",
+            vec![
+                0..1,                                         // pre-tx-exec
+                1..(tx_count as u64 + 1),                     // all txs exec
+                (tx_count as u64 + 1)..(tx_count as u64 + 2), // post-tx-exec
+            ],
+        ),
+        ("max granularity", (0..(tx_count as u64 + 2)).map(|i| i..(i + 1)).collect()),
     ];
 
-    let mut subblock_outputs = Vec::new();
+    for (range_name, test_ranges) in test_cases {
+        let mut subblock_outputs = Vec::new();
 
-    // Run subblock validation for each range
-    for bal_range in &ranges {
-        let input = SubblockInput {
+        for bal_range in &test_ranges {
+            let input = SubblockInput {
+                block: block.clone(),
+                witness: execution_witness.clone(),
+                bal: bal.clone(),
+                bal_range: bal_range.clone(),
+                chain_config: Default::default(),
+            };
+
+            let output = subblock_validation(
+                input,
+                public_keys.clone(),
+                chain_spec.clone(),
+                EthEvmConfig::new(chain_spec.clone()),
+            )
+            .map_err(|e| {
+                Error::Assertion(format!(
+                    "Subblock validation failed for {range_name} range {bal_range:?}: {e:?}"
+                ))
+            })?;
+
+            subblock_outputs.push(output);
+        }
+
+        let aggregation_input = AggregationInput {
             block: block.clone(),
             witness: execution_witness.clone(),
             bal: bal.clone(),
-            bal_range: bal_range.clone(),
             chain_config: Default::default(),
+            subblock_outputs,
+            bal_ranges: test_ranges.clone(),
         };
 
-        let output = subblock_validation(
-            input,
-            public_keys.clone(),
-            chain_spec.clone(),
-            EthEvmConfig::new(chain_spec.clone()),
-        )
-        .map_err(|e| {
-            Error::Assertion(format!("Subblock validation failed for range {bal_range:?}: {e:?}"))
-        })?;
-
-        subblock_outputs.push(output);
+        aggregation_validation(aggregation_input, public_keys.clone(), chain_spec.clone())
+            .map_err(|e| {
+                Error::Assertion(format!("Aggregation validation failed for {range_name}: {e:?}"))
+            })?;
     }
-
-    // Create aggregation input and run aggregation validation
-    let aggregation_input = AggregationInput {
-        block,
-        witness: execution_witness.clone(),
-        bal,
-        chain_config: Default::default(),
-        subblock_outputs,
-        bal_ranges: ranges,
-    };
-
-    aggregation_validation(aggregation_input, public_keys, chain_spec.clone())
-        .map_err(|e| Error::Assertion(format!("Aggregation validation failed: {e:?}")))?;
 
     Ok(())
 }
