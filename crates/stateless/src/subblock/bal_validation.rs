@@ -24,7 +24,7 @@ use super::error::SubblockValidationError;
 /// # Returns
 ///
 /// `Ok(())` if validation passes, or an error describing the mismatch.
-pub fn validate_subblock_bal(
+pub(crate) fn validate_subblock_bal(
     provided_bal: &Arc<Bal>,
     built_bal: Option<BlockAccessList>,
     bal_range: &Range<u64>,
@@ -37,9 +37,10 @@ pub fn validate_subblock_bal(
         let address = built_account.address;
 
         // Find corresponding account in provided BAL
-        let provided_account = provided_bal.accounts.get(&address).ok_or(
-            SubblockValidationError::BalAccountMissing { address },
-        )?;
+        let provided_account = provided_bal
+            .accounts
+            .get(&address)
+            .ok_or(SubblockValidationError::BalAccountMissing { address })?;
 
         // Validate balance changes within our range
         validate_balance_changes(
@@ -153,7 +154,7 @@ fn validate_storage_changes(
         let slot = slot_changes.slot;
 
         // Get the provided slot writes
-        let provided_slot_writes = provided_storage.storage.get(&slot.into());
+        let provided_slot_writes = provided_storage.storage.get(&slot);
 
         for change in &slot_changes.changes {
             let index = change.block_access_index;
@@ -183,7 +184,10 @@ fn validate_storage_changes(
 fn validate_code_changes(
     address: Address,
     built_changes: &[alloy_eip7928::CodeChange],
-    provided_writes: &revm_state::bal::BalWrites<(alloy_primitives::B256, reth_revm::bytecode::Bytecode)>,
+    provided_writes: &revm_state::bal::BalWrites<(
+        alloy_primitives::B256,
+        reth_revm::bytecode::Bytecode,
+    )>,
     bal_range: &Range<u64>,
 ) -> Result<(), SubblockValidationError> {
     for change in built_changes {
@@ -197,7 +201,7 @@ fn validate_code_changes(
         let provided_code = provided_writes.get(index + 1);
 
         // Compare by checking if the code bytes match
-        let matches = provided_code.map_or(false, |(_, bytecode)| {
+        let matches = provided_code.is_some_and(|(_, bytecode)| {
             bytecode.original_byte_slice() == change.new_code.as_ref()
         });
 
@@ -273,7 +277,11 @@ mod tests {
         let bal_val_at_1 = provided.accounts.get(&address).unwrap().account_info.balance.get(1);
         let bal_val_at_2 = provided.accounts.get(&address).unwrap().account_info.balance.get(2);
         assert_eq!(bal_val_at_1, None, "get(1) should return None (value not yet visible)");
-        assert_eq!(bal_val_at_2, Some(U256::from(100)), "get(2) should return Some(100) (visible after change at 1)");
+        assert_eq!(
+            bal_val_at_2,
+            Some(U256::from(100)),
+            "get(2) should return Some(100) (visible after change at 1)"
+        );
 
         // Create built BAL with matching balance change at index 1
         // Validation will check get(1+1) = get(2) which should equal post_balance
@@ -313,10 +321,7 @@ mod tests {
         let range = 0..5;
 
         let result = validate_subblock_bal(&provided, built, &range);
-        assert!(matches!(
-            result,
-            Err(SubblockValidationError::BalBalanceMismatch { .. })
-        ));
+        assert!(matches!(result, Err(SubblockValidationError::BalBalanceMismatch { .. })));
     }
 
     #[test]

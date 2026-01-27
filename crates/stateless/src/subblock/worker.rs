@@ -123,7 +123,8 @@ where
     let start_bal_index = bal_range.start;
 
     // Create BAL-aware database (clone BAL so we keep it for validation later)
-    let db = BalWitnessDatabase::new(&trie, bytecode, ancestor_hashes, bal.clone(), start_bal_index);
+    let db =
+        BalWitnessDatabase::new(&trie, bytecode, ancestor_hashes, bal.clone(), start_bal_index);
 
     // Determine subblock position flags
     // is_first: BAL range starts at 0 (includes pre-execution system calls)
