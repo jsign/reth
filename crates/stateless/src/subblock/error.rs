@@ -1,7 +1,7 @@
 //! Error types for subblock proving.
 
 use alloc::string::String;
-use alloy_primitives::B256;
+use alloy_primitives::{Address, B256, U256};
 
 use crate::validation::StatelessValidationError;
 
@@ -30,6 +30,67 @@ pub enum SubblockValidationError {
     /// BAL error (account or slot not found).
     #[error("BAL error: {0}")]
     BalError(String),
+
+    /// BAL was not built during execution when it was expected.
+    #[error("BAL was not built during execution")]
+    BalNotBuilt,
+
+    /// Account found in built BAL but missing from provided BAL.
+    #[error("account {address} in built BAL not found in provided BAL")]
+    BalAccountMissing {
+        /// The missing account address.
+        address: Address,
+    },
+
+    /// Balance change mismatch between built and provided BAL.
+    #[error("balance mismatch for {address} at index {index}: built {built}, provided {provided}")]
+    BalBalanceMismatch {
+        /// Account address.
+        address: Address,
+        /// BAL index where mismatch occurred.
+        index: u64,
+        /// Value from built BAL.
+        built: U256,
+        /// Value from provided BAL.
+        provided: U256,
+    },
+
+    /// Nonce change mismatch between built and provided BAL.
+    #[error("nonce mismatch for {address} at index {index}: built {built}, provided {provided}")]
+    BalNonceMismatch {
+        /// Account address.
+        address: Address,
+        /// BAL index where mismatch occurred.
+        index: u64,
+        /// Value from built BAL.
+        built: u64,
+        /// Value from provided BAL.
+        provided: u64,
+    },
+
+    /// Storage change mismatch between built and provided BAL.
+    #[error("storage mismatch for {address} slot {slot} at index {index}: built {built}, provided {provided}")]
+    BalStorageMismatch {
+        /// Account address.
+        address: Address,
+        /// Storage slot.
+        slot: U256,
+        /// BAL index where mismatch occurred.
+        index: u64,
+        /// Value from built BAL.
+        built: U256,
+        /// Value from provided BAL.
+        provided: U256,
+    },
+
+    /// Code change mismatch between built and provided BAL.
+    #[error("code mismatch for {address} at index {index}")]
+    BalCodeMismatch {
+        /// Account address.
+        address: Address,
+        /// BAL index where mismatch occurred.
+        index: u64,
+    },
 }
 
 /// Errors that can occur during aggregation validation.
