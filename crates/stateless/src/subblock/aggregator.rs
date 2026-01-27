@@ -4,7 +4,7 @@
 
 use alloc::{fmt::Debug, sync::Arc, vec::Vec};
 use alloy_consensus::{BlockHeader, Header, TxReceipt};
-use alloy_eips::eip7685::Requests;
+use alloy_eips::{eip7685::Requests, eip7928::compute_block_access_list_hash};
 use alloy_primitives::{keccak256, Bloom, B256};
 use core::ops::Range;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
@@ -77,6 +77,20 @@ where
 
     // Verify gas chaining
     verify_gas_chaining(&subblock_outputs, &bal_ranges)?;
+
+    // Verify BAL hash matches block header commitment (EIP-7928, Amsterdam)
+    // Only validate if block has block_access_list_hash (post-Amsterdam)
+    if let Some(expected_hash) = block.header.block_access_list_hash() {
+        // Convert revm Bal to alloy BlockAccessList for hash computation
+        let alloy_bal = (*bal).clone().into_alloy_bal();
+        let provided_bal_hash = compute_block_access_list_hash(&alloy_bal);
+        if provided_bal_hash != expected_hash {
+            return Err(AggregationValidationError::BalHashMismatch {
+                computed: provided_bal_hash,
+                expected: expected_hash,
+            });
+        }
+    }
 
     // Recover signers (for block hash computation)
     let recovered_block = recover_block_with_public_keys(block.clone(), public_keys, &*chain_spec)
