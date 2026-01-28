@@ -35,12 +35,6 @@
 
 extern crate alloc;
 
-// Silence unused crate warnings - these are used in submodules but not directly in lib.rs
-use alloy_eip7928 as _;
-use alloy_evm as _;
-use reth_ethereum_forks as _;
-use reth_evm_ethereum as _;
-
 mod recover_block;
 /// Sparse trie implementation for stateless validation
 pub mod trie;
