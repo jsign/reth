@@ -13,15 +13,42 @@ use revm_state::bal::Bal;
 /// Provider for pre-state account data during BAL conversion.
 ///
 /// Used to look up existing account values when BAL only contains partial changes.
+///
+/// # Purpose
+///
+/// When converting a BAL to `HashedPostState`, some account fields may not have
+/// changed during execution. For example, if only the balance changed, we need
+/// to look up the existing nonce and code hash from pre-state.
+///
+/// # Implementers
+///
+/// Typical implementations include:
+/// - The stateless trie (provides pre-state from witness proofs)
+/// - A mock provider (for testing)
+///
+/// # Example
+///
+/// ```ignore
+/// impl PreStateAccountProvider for StatelessSparseTrie {
+///     type Error = StatelessValidationError;
+///
+///     fn account(&self, address: Address) -> Result<Option<TrieAccount>, Self::Error> {
+///         // Look up account in the sparse trie
+///         self.get_account(address)
+///     }
+/// }
+/// ```
 pub trait PreStateAccountProvider {
     /// Error type for account lookups.
     type Error;
 
     /// Returns the pre-state account for the given address.
     ///
-    /// - `Ok(Some(account))` - account exists in pre-state
-    /// - `Ok(None)` - account proven to not exist (new account)
-    /// - `Err(...)` - witness incomplete, cannot determine pre-state
+    /// # Returns
+    ///
+    /// - `Ok(Some(account))` - Account exists in pre-state with the given values
+    /// - `Ok(None)` - Account proven to not exist (new account created during execution)
+    /// - `Err(...)` - Witness incomplete, cannot determine pre-state
     fn account(&self, address: Address) -> Result<Option<TrieAccount>, Self::Error>;
 }
 

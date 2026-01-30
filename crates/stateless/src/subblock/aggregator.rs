@@ -1,6 +1,44 @@
 //! Master/aggregator guest program for subblock aggregation.
 //!
-//! Combines verified subblock outputs and computes final state root.
+//! Combines verified subblock outputs, validates the post-state root, and produces
+//! the block hash.
+//!
+//! # Range Verification
+//!
+//! BAL ranges must be complete and contiguous. For a block with N transactions:
+//!
+//! ```text
+//! Valid:   [0, 4) [4, 8) [8, N+2)  ✓ Complete, contiguous
+//!          [0, N+2)                 ✓ Single range
+//!
+//! Invalid: [1, 5) [5, N+2)         ✗ Doesn't start at 0
+//!          [0, 3) [4, N+2)         ✗ Gap between 3 and 4
+//!          [0, N)                  ✗ Missing post-execution
+//! ```
+//!
+//! # Gas Adjustment (Local to Global)
+//!
+//! Each subblock produces receipts with LOCAL cumulative gas. The aggregator
+//! adjusts to GLOBAL positions:
+//!
+//! ```text
+//! Subblock 1 (offset=0):          Subblock 2 (offset=63000):
+//! ├─ tx0: local=21000 → 21000     ├─ tx3: local=30000 → 93000
+//! ├─ tx1: local=42000 → 42000     └─ tx4: local=51000 → 114000
+//! └─ tx2: local=63000 → 63000
+//!
+//! Formula: global_gas = local_gas + offset
+//! Next offset = previous offset + last receipt's local cumulative gas
+//! ```
+//!
+//! # Post-State Root Validation
+//!
+//! After combining outputs, the aggregator:
+//! 1. Converts the BAL to `HashedPostState` at the final index
+//! 2. Updates the sparse trie with state changes
+//! 3. Computes the state root and compares against the block header
+//!
+//! If the computed root doesn't match, the block is invalid.
 
 use alloc::{fmt::Debug, sync::Arc, vec::Vec};
 use alloy_consensus::{BlockHeader, Header, TxReceipt};
@@ -171,6 +209,18 @@ where
 /// - Index n+1 = post-execution (withdrawals)
 ///
 /// For a complete block, ranges must cover `[0, tx_count + 2)`.
+///
+/// # Example (10 transactions)
+///
+/// ```text
+/// Required coverage: [0, 12)  (tx_count + 2 = 12)
+///
+/// [0, 4) [4, 8) [8, 12)
+///  ├──────┼──────┼──────┤
+///  0      4      8      12
+///                        ↑
+///                     Must reach here
+/// ```
 fn verify_bal_ranges_complete(
     bal_ranges: &[Range<u64>],
     tx_count: usize,
@@ -259,6 +309,21 @@ fn verify_gas_chaining(
 ///
 /// Adjusts cumulative gas in receipts so they reflect global block position
 /// rather than local subblock position.
+///
+/// # Gas Adjustment Example
+///
+/// ```text
+/// Input:
+///   Subblock 1: receipts = [{gas: 21000}, {gas: 42000}]
+///   Subblock 2: receipts = [{gas: 30000}]
+///
+/// Processing:
+///   offset = 0
+///   Subblock 1: receipts become [{gas: 21000}, {gas: 42000}], offset → 42000
+///   Subblock 2: receipts become [{gas: 72000}]  (30000 + 42000)
+///
+/// Output: [{gas: 21000}, {gas: 42000}, {gas: 72000}]
+/// ```
 fn combine_subblock_outputs(
     outputs: &[SubblockOutput<EthereumReceipt>],
 ) -> (Vec<EthereumReceipt>, Bloom, Requests) {

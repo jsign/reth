@@ -1,6 +1,40 @@
 //! BAL validation utilities for subblock execution.
 //!
 //! Validates that the BAL built during execution matches the provided BAL.
+//!
+//! # Validation Strategy
+//!
+//! During subblock execution, the EVM's BAL builder records all state changes.
+//! After execution, this module compares the built BAL against the provided
+//! (full-block) BAL to ensure correctness within the executed range.
+//!
+//! Only changes within `bal_range` are validated; changes outside the range are
+//! ignored (they belong to other subblocks).
+//!
+//! # BalWrites Index Semantics
+//!
+//! `BalWrites::get(i)` returns the value **visible at the START of index `i`**,
+//! which is the state **AFTER** a write at index `i-1`. Therefore:
+//!
+//! - A change recorded at `block_access_index: N` with value `V`
+//! - Is validated by checking `provided_writes.get(N + 1) == Some(V)`
+//!
+//! ```text
+//! Index:    0     1     2     3     4
+//!           │     │     │     │     │
+//! Value:   [?]   [A]   [A]   [B]   [B]
+//!                 ▲           ▲
+//!                 │           │
+//!          Write A at 0   Write B at 2
+//!
+//! get(0) = None     (no prior state)
+//! get(1) = Some(A)  (visible after write at 0)
+//! get(2) = Some(A)  (no write at 1, still A)
+//! get(3) = Some(B)  (visible after write at 2)
+//! get(4) = Some(B)  (no write at 3, still B)
+//! ```
+//!
+//! This offset-by-one is why all validation functions check `get(index + 1)`.
 
 use alloc::sync::Arc;
 use alloy_eip7928::BlockAccessList;

@@ -1,6 +1,41 @@
 //! Worker guest program for subblock validation.
 //!
 //! Executes a range of transactions within a block using BAL fast-forwarding.
+//!
+//! # BAL Range to Transaction Index Conversion
+//!
+//! BAL indices don't map 1:1 to transaction indices because index 0 is reserved
+//! for pre-execution:
+//!
+//! ```text
+//! BAL index:    0       1       2       ...     N       N+1
+//!               │       │       │               │       │
+//!               ▼       ▼       ▼               ▼       ▼
+//!            [pre]   [tx 0]  [tx 1]   ...   [tx N-1]  [post]
+//! ```
+//!
+//! Conversion formula:
+//! - `tx_start = bal_range.start == 0 ? 0 : bal_range.start - 1`
+//! - `tx_end = min(bal_range.end - 1, tx_count)`
+//!
+//! # Subblock Position Flags
+//!
+//! The `is_first` and `is_last` flags are derived directly from the BAL range:
+//!
+//! | Flag | Condition | Meaning |
+//! |------|-----------|---------|
+//! | `is_first` | `bal_range.start == 0` | Range includes pre-execution at index 0 |
+//! | `is_last` | `bal_range.end > tx_count` | Range includes post-execution at index N+1 |
+//!
+//! These flags determine:
+//! - `is_first`: Whether to call `apply_pre_execution_changes()` (beacon root, blockhashes)
+//! - `is_last`: Whether to process withdrawals in `finish()`
+//!
+//! # BAL Validation
+//!
+//! After execution, the BAL built during execution is compared against the provided
+//! BAL to ensure correctness. Only changes within `bal_range` are validated; changes
+//! outside the range are ignored (they belong to other subblocks).
 
 use alloc::{fmt::Debug, sync::Arc, vec::Vec};
 use alloy_consensus::{BlockHeader, Header, TxReceipt};

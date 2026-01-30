@@ -1,6 +1,38 @@
 //! BAL-aware witness database for subblock execution.
 //!
-//! Wraps `WitnessDatabase` with `BalState` to support BAL fast-forwarding.
+//! Wraps the stateless trie with `BalState` to support BAL fast-forwarding.
+//!
+//! # Layered Database Approach
+//!
+//! This database combines two data sources:
+//!
+//! 1. **Pre-state from the witness trie**: The original state before block execution
+//! 2. **Fast-forwarded state from the BAL**: State changes up to the current BAL index
+//!
+//! # Lookup Priority
+//!
+//! For each database operation, the BAL is checked first:
+//!
+//! ```text
+//! ┌─────────────────────────────────────────┐
+//! │  Database Request (address, slot, etc.) │
+//! └──────────────────┬──────────────────────┘
+//!                    │
+//!        ┌───────────▼───────────┐
+//!        │  Check BalState       │
+//!        │  (at current index)   │
+//!        └───────────┬───────────┘
+//!                    │
+//!           Has value at bal_index?
+//!          /                      \
+//!        Yes                       No
+//!          │                        │
+//!   Return BAL value         Query StatelessTrie
+//!   (fast-forwarded)          (pre-state)
+//! ```
+//!
+//! This allows subblocks to "see" the correct state at their starting BAL index
+//! without re-executing prior transactions.
 
 use alloc::{collections::btree_map::BTreeMap, format, sync::Arc};
 use alloy_primitives::{map::B256Map, Address, B256, U256};

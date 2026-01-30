@@ -1,4 +1,22 @@
 //! Partial block execution utilities for subblock validation.
+//!
+//! Creates execution contexts customized for subblock position.
+//!
+//! # Subblock Positions
+//!
+//! A subblock's position determines which extra processing occurs:
+//!
+//! | Position | `is_first` | `is_last` | Pre-execution | Post-execution |
+//! |----------|------------|-----------|---------------|----------------|
+//! | First    | `true`     | `false`   | Beacon root, blockhashes | - |
+//! | Middle   | `false`    | `false`   | - | - |
+//! | Last     | `false`    | `true`    | - | Withdrawals |
+//! | Single   | `true`     | `true`    | Beacon root, blockhashes | Withdrawals |
+//!
+//! # Flag Derivation from BAL Range
+//!
+//! - `is_first = bal_range.start == 0` (includes pre-execution at index 0)
+//! - `is_last = bal_range.end > tx_count` (includes post-execution at index N+1)
 
 use alloc::borrow::Cow;
 use alloy_consensus::BlockHeader;
