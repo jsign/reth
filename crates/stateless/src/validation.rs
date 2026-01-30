@@ -24,6 +24,11 @@ use reth_evm::{
 };
 use reth_primitives_traits::{RecoveredBlock, SealedHeader};
 use reth_trie_common::{HashedPostState, KeccakKeyHasher};
+use ziskos::{
+    read_input_slice, set_output, ziskos_profile_absolute, ziskos_profile_counter,
+    ziskos_profile_end, ziskos_profile_relative, ziskos_profile_reset_relative,
+    ziskos_profile_start, ziskos_profile_value,
+};
 
 /// BLOCKHASH ancestor lookup window limit per EVM (number of most recent blocks accessible).
 const BLOCKHASH_ANCESTOR_LIMIT: usize = 256;
@@ -179,7 +184,9 @@ where
     ChainSpec: Send + Sync + EthChainSpec<Header = Header> + EthereumHardforks + Debug,
     E: ConfigureEvm<Primitives = EthPrimitives> + Clone + 'static,
 {
+    ziskos_profile_start!(RECOVER_BLOCK = 1);
     let current_block = recover_block_with_public_keys(current_block, public_keys, &*chain_spec)?;
+    ziskos_profile_end!(RECOVER_BLOCK);
 
     let mut ancestor_headers: Vec<_> = witness
         .headers
@@ -218,11 +225,13 @@ where
     // Validate block against pre-execution consensus rules
     validate_block_consensus(chain_spec.clone(), &current_block, parent)?;
 
+    ziskos_profile_start!(VERIFY_PRESTATE = 1);
     // First verify that the pre-state reads are correct
     let (mut trie, bytecode) = T::new(&witness, parent.state_root)?;
 
     // Create an in-memory database that will use the reads to validate the block
     let db = WitnessDatabase::new(&trie, bytecode, ancestor_hashes);
+    ziskos_profile_end!(VERIFY_PRESTATE);
 
     // Execute the block
     let executor = evm_config.executor(db);
