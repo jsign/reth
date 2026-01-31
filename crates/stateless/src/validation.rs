@@ -184,6 +184,7 @@ where
     ChainSpec: Send + Sync + EthChainSpec<Header = Header> + EthereumHardforks + Debug,
     E: ConfigureEvm<Primitives = EthPrimitives> + Clone + 'static,
 {
+    ziskos_profile_absolute!(BEFORE_RETH = 10);
     ziskos_profile_start!(RECOVER_BLOCK = 1);
     let current_block = recover_block_with_public_keys(current_block, public_keys, &*chain_spec)?;
     ziskos_profile_end!(RECOVER_BLOCK);
