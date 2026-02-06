@@ -23,7 +23,10 @@ alloy-genesis = { workspace = true, features = ["serde-bincode-compat"] }
 # reth
 reth-ethereum-consensus.workspace = true
 reth-primitives-traits.workspace = true
-reth-ethereum-primitives = { workspace = true, features = ["serde", "serde-bincode-compat"] }
+reth-ethereum-primitives = { workspace = true, features = [
+    "serde",
+    "serde-bincode-compat",
+] }
 reth-errors.workspace = true
 reth-evm.workspace = true
 reth-revm.workspace = true
@@ -40,6 +43,8 @@ serde_with.workspace = true
 
 k256 = { workspace = true, optional = true }
 secp256k1 = { workspace = true, optional = true }
+
+ziskos = { git = "https://github.com/0xPolygonHermez/zisk.git", tag = "v0.15.0" }
 
 [features]
 default = ["k256"]

@@ -24,6 +24,7 @@ use reth_evm::{
 };
 use reth_primitives_traits::{RecoveredBlock, SealedHeader};
 use reth_trie_common::{HashedPostState, KeccakKeyHasher};
+use ziskos::{ziskos_profile_end, ziskos_profile_start};
 
 /// BLOCKHASH ancestor lookup window limit per EVM (number of most recent blocks accessible).
 const BLOCKHASH_ANCESTOR_LIMIT: usize = 256;
@@ -179,8 +180,11 @@ where
     ChainSpec: Send + Sync + EthChainSpec<Header = Header> + EthereumHardforks + Debug,
     E: ConfigureEvm<Primitives = EthPrimitives> + Clone + 'static,
 {
+    ziskos_profile_start!(RECOVER_PUBLIC_KEYS = 30);
     let current_block = recover_block_with_public_keys(current_block, public_keys, &*chain_spec)?;
+    ziskos_profile_end!(RECOVER_PUBLIC_KEYS);
 
+    ziskos_profile_start!(VALIDATE_ANCESTOR_HEADERS = 31);
     let mut ancestor_headers: Vec<_> = witness
         .headers
         .iter()
@@ -206,6 +210,7 @@ where
 
     // Check that the ancestor headers form a contiguous chain and are not just random headers.
     let ancestor_hashes = compute_ancestor_hashes(&current_block, &ancestor_headers)?;
+    ziskos_profile_end!(VALIDATE_ANCESTOR_HEADERS);
 
     // There should be at least one ancestor header.
     // The edge case here would be the genesis block, but we do not create proofs for the genesis
@@ -215,21 +220,28 @@ where
         None => return Err(StatelessValidationError::MissingAncestorHeader),
     };
 
+    ziskos_profile_start!(VALIDATE_BLOCK_CONSENSUS = 32);
     // Validate block against pre-execution consensus rules
     validate_block_consensus(chain_spec.clone(), &current_block, parent)?;
+    ziskos_profile_end!(VALIDATE_BLOCK_CONSENSUS);
 
+    ziskos_profile_start!(VALIDATE_ACCOUNT_TRIE = 33);
     // First verify that the pre-state reads are correct
     let (mut trie, bytecode) = T::new(&witness, parent.state_root)?;
+    ziskos_profile_end!(VALIDATE_ACCOUNT_TRIE);
 
     // Create an in-memory database that will use the reads to validate the block
     let db = WitnessDatabase::new(&trie, bytecode, ancestor_hashes);
 
+    ziskos_profile_start!(EXECUTE_BLOCK = 34);
     // Execute the block
     let executor = evm_config.executor(db);
     let output = executor
         .execute(&current_block)
         .map_err(|e| StatelessValidationError::StatelessExecutionFailed(e.to_string()))?;
+    ziskos_profile_end!(EXECUTE_BLOCK);
 
+    ziskos_profile_start!(POST_VALIDATION_CHECKS = 35);
     // Post validation checks
     validate_block_post_execution(
         &current_block,
@@ -239,7 +251,9 @@ where
         None,
     )
     .map_err(StatelessValidationError::ConsensusValidationFailed)?;
+    ziskos_profile_end!(POST_VALIDATION_CHECKS);
 
+    ziskos_profile_start!(COMPUTE_POST_STATE_ROOT = 36);
     // Compute and check the post state root
     let hashed_state = HashedPostState::from_bundle_state::<KeccakKeyHasher>(&output.state.state);
     let state_root = trie.calculate_state_root(hashed_state)?;
@@ -249,6 +263,7 @@ where
             expected: current_block.state_root,
         });
     }
+    ziskos_profile_end!(COMPUTE_POST_STATE_ROOT);
 
     // Return block hash
     Ok((current_block.hash_slow(), output))
