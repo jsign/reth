@@ -103,6 +103,8 @@ pub struct SubblockOutput<R = alloy_consensus::Receipt> {
     /// Only populated for the last subblock (`is_last = true`), which processes
     /// withdrawals and generates deposit/withdrawal requests.
     pub requests: Requests,
+    /// Total gas used by transactions in this subblock.
+    pub gas_used: u64,
 }
 
 /// Input to the master/aggregator guest program.

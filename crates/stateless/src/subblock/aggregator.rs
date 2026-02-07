@@ -157,7 +157,7 @@ where
     ))?;
 
     // Combine outputs
-    let (combined_receipts, combined_bloom, combined_requests) =
+    let (combined_receipts, combined_bloom, combined_requests, combined_gas_used) =
         combine_subblock_outputs(&subblock_outputs);
 
     // Run post-block validation
@@ -167,6 +167,7 @@ where
         &combined_receipts,
         &combined_requests,
         None,
+        Some(combined_gas_used),
     )?;
 
     // Compute final state root from BAL
@@ -326,10 +327,11 @@ fn verify_gas_chaining(
 /// ```
 fn combine_subblock_outputs(
     outputs: &[SubblockOutput<EthereumReceipt>],
-) -> (Vec<EthereumReceipt>, Bloom, Requests) {
+) -> (Vec<EthereumReceipt>, Bloom, Requests, u64) {
     let mut combined_receipts = Vec::new();
     let mut combined_bloom = Bloom::default();
     let mut combined_requests = Requests::default();
+    let mut combined_gas_used = 0u64;
     let mut gas_offset: u64 = 0;
 
     for output in outputs {
@@ -349,9 +351,11 @@ fn combine_subblock_outputs(
         if !output.requests.is_empty() {
             combined_requests = output.requests.clone();
         }
+
+        combined_gas_used += output.gas_used;
     }
 
-    (combined_receipts, combined_bloom, combined_requests)
+    (combined_receipts, combined_bloom, combined_requests, combined_gas_used)
 }
 
 #[cfg(test)]
@@ -453,14 +457,16 @@ mod tests {
             receipts: vec![receipt1, receipt2],
             logs_bloom: Bloom::default(),
             requests: Requests::default(),
+            gas_used: 42000,
         };
         let output2 = SubblockOutput {
             receipts: vec![receipt3],
             logs_bloom: Bloom::default(),
             requests: Requests::default(),
+            gas_used: 30000,
         };
 
-        let (combined, _, _) = combine_subblock_outputs(&[output1, output2]);
+        let (combined, _, _, _) = combine_subblock_outputs(&[output1, output2]);
 
         // After adjustment:
         // - Receipt 1: 21000 (no offset)
@@ -494,11 +500,13 @@ mod tests {
             receipts: vec![receipt1],
             logs_bloom: Bloom::default(),
             requests: Requests::default(),
+            gas_used: 42000,
         };
         let output2 = SubblockOutput {
             receipts: vec![receipt2],
             logs_bloom: Bloom::default(),
             requests: Requests::default(),
+            gas_used: 21000,
         };
 
         let ranges: Vec<Range<u64>> = vec![0..3, 3..5];

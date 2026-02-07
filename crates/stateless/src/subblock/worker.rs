@@ -247,7 +247,9 @@ where
     // Requests are only populated for the last subblock (withdrawals processed there)
     let requests = result.requests;
 
-    Ok(SubblockOutput { receipts, logs_bloom, requests })
+    let gas_used = result.gas_used;
+
+    Ok(SubblockOutput { receipts, logs_bloom, requests, gas_used })
 }
 
 #[cfg(test)]
