@@ -8,6 +8,7 @@ use alloy_primitives::{keccak256, Address, Bloom, Bytes, B256, B64, U256};
 use reth_chainspec::{ChainSpec, ChainSpecBuilder, EthereumHardfork, ForkCondition};
 use reth_db_api::{cursor::DbDupCursorRO, tables, transaction::DbTx};
 use reth_primitives_traits::SealedHeader;
+use reth_stateless::ExecutionWitness;
 use revm::primitives::HashMap;
 use serde::Deserialize;
 use std::{
@@ -141,6 +142,71 @@ pub struct Block {
     pub transaction_sequence: Option<Vec<TransactionSequence>>,
     /// Withdrawals
     pub withdrawals: Option<Withdrawals>,
+    /// Execution witness for stateless validation.
+    pub execution_witness: Option<FixtureExecutionWitness>,
+}
+
+/// Execution witness from test fixtures.
+///
+/// Uses serde aliases to accept both alloy's field names (`state`/`codes`/`headers`)
+/// and the fixture's field names (`nodes`/`bytecodes`/`ancestors`).
+#[derive(Debug, PartialEq, Eq, Clone, Deserialize, Default)]
+pub struct FixtureExecutionWitness {
+    /// Trie nodes / state witness.
+    #[serde(alias = "nodes", default)]
+    pub state: Vec<Bytes>,
+    /// Contract bytecodes.
+    #[serde(alias = "bytecodes", default)]
+    pub codes: Vec<Bytes>,
+    /// Ancestor block headers.
+    #[serde(alias = "ancestors", default)]
+    pub headers: Vec<Bytes>,
+}
+
+impl FixtureExecutionWitness {
+    /// Asserts that the generated [`ExecutionWitness`] matches this fixture witness.
+    ///
+    /// Compares `state`, `codes`, and `headers` fields individually (sorted).
+    /// The `keys` field from the generated witness is ignored since fixtures don't include it.
+    pub fn assert_matches(&self, generated: &ExecutionWitness) -> Result<(), Error> {
+        let mut expected_state = self.state.clone();
+        let mut generated_state = generated.state.clone();
+        expected_state.sort();
+        generated_state.sort();
+        assert_equal(expected_state, generated_state, "execution witness state (nodes) mismatch")?;
+
+        let mut expected_codes = self.codes.clone();
+        let mut generated_codes = generated.codes.clone();
+        expected_codes.sort();
+        generated_codes.sort();
+        assert_equal(
+            expected_codes.len(),
+            generated_codes.len(),
+            "execution witness codes (bytecodes) count mismatch",
+        )?;
+        assert_equal(
+            expected_codes,
+            generated_codes,
+            "execution witness codes (bytecodes) mismatch",
+        )?;
+
+        let mut expected_headers = self.headers.clone();
+        let mut generated_headers = generated.headers.clone();
+        expected_headers.sort();
+        generated_headers.sort();
+        assert_equal(
+            expected_headers.len(),
+            generated_headers.len(),
+            "execution witness headers (ancestors) count mismatch",
+        )?;
+        assert_equal(
+            expected_headers,
+            generated_headers,
+            "execution witness headers (ancestors) mismatch",
+        )?;
+
+        Ok(())
+    }
 }
 
 /// Transaction sequence in block

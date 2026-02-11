@@ -309,6 +309,14 @@ fn run_case(
 
         program_inputs.push((block.clone(), exec_witness));
 
+        // Compare the generated witness against the fixture's expected witness (if present)
+        if let Some(expected_witness) = &case.blocks[block_index].execution_witness {
+            let (_, exec_witness) = program_inputs.last().unwrap();
+            expected_witness
+                .assert_matches(exec_witness)
+                .map_err(|err| Error::block_failed(block_number, program_inputs.clone(), err))?;
+        }
+
         // Compute and check the post state root
         let hashed_state =
             HashedPostState::from_bundle_state::<KeccakKeyHasher>(output.state.state());
@@ -368,13 +376,6 @@ fn run_case(
 
     // Now validate using the stateless client if everything else passes
     for (recovered_block, execution_witness) in &program_inputs {
-        let mut execution_witness = execution_witness.clone();
-        execution_witness.keys = Default::default();
-        execution_witness.state.sort();
-        execution_witness.codes.sort();
-        execution_witness.headers.sort();
-        println!("{}", serde_json::to_string_pretty(&execution_witness).unwrap());
-
         let block = recovered_block.clone().into_block();
 
         // Recover the actual public keys from the transaction signatures
