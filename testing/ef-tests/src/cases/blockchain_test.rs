@@ -28,6 +28,7 @@ use reth_stateless::{
 };
 use reth_trie::{HashedPostState, KeccakKeyHasher, StateRoot};
 use reth_trie_db::DatabaseStateRoot;
+use revm::handler::execution;
 use std::{
     collections::BTreeMap,
     fs,
@@ -367,6 +368,13 @@ fn run_case(
 
     // Now validate using the stateless client if everything else passes
     for (recovered_block, execution_witness) in &program_inputs {
+        let mut execution_witness = execution_witness.clone();
+        execution_witness.keys = Default::default();
+        execution_witness.state.sort();
+        execution_witness.codes.sort();
+        execution_witness.headers.sort();
+        println!("{}", serde_json::to_string_pretty(&execution_witness).unwrap());
+
         let block = recovered_block.clone().into_block();
 
         // Recover the actual public keys from the transaction signatures
