@@ -46,8 +46,17 @@ impl ExecutionWitnessRecord {
             )
             .collect();
 
-        for (address, account) in &statedb.cache.accounts {
+        // Collect and sort addresses for deterministic printing
+        let mut sorted_accounts: Vec<_> = statedb.cache.accounts.iter().collect();
+        sorted_accounts.sort_by_key(|(addr, _)| *addr);
+
+        println!(
+            "=== record_executed_state: cached accounts ({}) ===",
+            sorted_accounts.len()
+        );
+        for (address, account) in &sorted_accounts {
             let hashed_address = keccak256(address);
+            println!("  addr={address:?}");
             self.hashed_state
                 .accounts
                 .insert(hashed_address, account.account.as_ref().map(|a| (&a.info).into()));
@@ -61,10 +70,14 @@ impl ExecutionWitnessRecord {
             if let Some(account) = &account.account {
                 self.keys.push(address.to_vec().into());
 
-                for (slot, value) in &account.storage {
-                    let slot = B256::from(*slot);
+                let mut sorted_slots: Vec<_> = account.storage.iter().collect();
+                sorted_slots.sort_by_key(|(slot, _)| *slot);
+
+                for (slot, value) in &sorted_slots {
+                    let slot = B256::from(**slot);
                     let hashed_slot = keccak256(slot);
-                    storage.storage.insert(hashed_slot, *value);
+                    storage.storage.insert(hashed_slot, **value);
+                    println!("    slot={slot:?} => {value:?}");
 
                     self.keys.push(slot.into());
                 }
