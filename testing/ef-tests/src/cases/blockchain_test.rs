@@ -185,7 +185,11 @@ impl Case for BlockchainTestCase {
             .filter(|(_, case)| !Self::excluded_fork(case.network))
             .par_bridge_buffered()
             .with_min_len(64)
-            .try_for_each(|(name, case)| Self::run_single_case(&name, &case).map(|_| ()))
+            .try_for_each(|(name, case)| {
+                Self::run_single_case(&name, &case).map(|_| ()).map_err(|err| {
+                    Error::TestCaseFailed { name, err: Box::new(err) }
+                })
+            })
     }
 }
 
