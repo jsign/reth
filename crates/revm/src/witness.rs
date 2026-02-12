@@ -52,10 +52,13 @@ impl ExecutionWitnessRecord {
         let mut sorted_accounts: Vec<_> = statedb.cache.accounts.iter().collect();
         sorted_accounts.sort_by_key(|(addr, _)| *addr);
 
-        println!("=== record_executed_state: cached accounts ({}) ===", sorted_accounts.len());
+        // println!(
+        //     "=== record_executed_state: cached accounts ({}) ===",
+        //     sorted_accounts.len()
+        // );
         for (address, account) in &sorted_accounts {
             let hashed_address = keccak256(address);
-            println!("  addr={address:?}");
+            // println!("  addr={address:?}");
             self.hashed_state
                 .accounts
                 .insert(hashed_address, account.account.as_ref().map(|a| (&a.info).into()));
@@ -76,7 +79,7 @@ impl ExecutionWitnessRecord {
                     let slot = B256::from(**slot);
                     let hashed_slot = keccak256(slot);
                     storage.storage.insert(hashed_slot, **value);
-                    println!("    slot={slot:?} => {value:?}");
+                    // println!("    slot={slot:?} => {value:?}");
 
                     self.keys.push(slot.into());
                 }

@@ -220,11 +220,8 @@ fn assert_equal_bytes_vecs(
     let in_expected_only: Vec<_> = expected_set.difference(&generated_set).collect();
     let in_generated_only: Vec<_> = generated_set.difference(&expected_set).collect();
 
-    let mut msg = format!(
-        "{label} mismatch — expected {}, generated {}",
-        expected.len(),
-        generated.len()
-    );
+    let mut msg =
+        format!("{label} mismatch — expected {}, generated {}", expected.len(), generated.len());
 
     if !in_expected_only.is_empty() {
         msg.push_str(&format!(
