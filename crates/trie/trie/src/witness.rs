@@ -226,6 +226,10 @@ where
             }
         }
 
+        // Filter out empty trie root nodes — they carry no useful witness information
+        // since any verifier can reconstruct an empty trie root trivially.
+        self.witness.retain(|_, v| v.as_ref() != [EMPTY_STRING_CODE]);
+
         Ok(self.witness)
     }
 

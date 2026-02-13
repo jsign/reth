@@ -28,7 +28,6 @@ use reth_stateless::{
 };
 use reth_trie::{HashedPostState, KeccakKeyHasher, StateRoot};
 use reth_trie_db::DatabaseStateRoot;
-use revm::handler::execution;
 use std::{
     collections::BTreeMap,
     fs,
@@ -186,9 +185,9 @@ impl Case for BlockchainTestCase {
             .par_bridge_buffered()
             .with_min_len(64)
             .try_for_each(|(name, case)| {
-                Self::run_single_case(&name, &case).map(|_| ()).map_err(|err| {
-                    Error::TestCaseFailed { name, err: Box::new(err) }
-                })
+                Self::run_single_case(&name, &case)
+                    .map(|_| ())
+                    .map_err(|err| Error::TestCaseFailed { name, err: Box::new(err) })
             })
     }
 }
