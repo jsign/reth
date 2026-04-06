@@ -15,8 +15,8 @@ use alloy_rlp::{Encodable, EMPTY_STRING_CODE};
 use alloy_trie::{nodes::BranchNodeRef, EMPTY_ROOT_HASH};
 use reth_execution_errors::{SparseStateTrieErrorKind, StateProofError, TrieWitnessError};
 use reth_trie_common::{
-    DecodedMultiProofV2, ExecutionWitnessMode, HashedPostState, MultiProofTargetsV2, ProofV2Target,
-    TrieNodeV2,
+    DecodedMultiProofV2, ExecutionWitnessMode, HashedPostState, MultiProofTargetsV2,
+    ProofTrieNodeV2, ProofV2Target, TrieNodeV2,
 };
 use reth_trie_sparse::{LeafUpdate, SparseStateTrie, SparseTrie as _};
 
@@ -133,7 +133,7 @@ where
         let multiproof =
             Proof::new(self.trie_cursor_factory.clone(), self.hashed_cursor_factory.clone())
                 .with_prefix_sets_mut(self.prefix_sets.clone())
-                .multiproof_v2(proof_targets)?;
+                .multiproof_v2(proof_targets.clone())?;
 
         // No need to reconstruct the rest of the trie, we just need to include
         // the root node and return.
@@ -152,7 +152,7 @@ where
         }
 
         // Record all nodes from multiproof in the witness.
-        self.record_multiproof_nodes(&multiproof);
+        self.record_multiproof_nodes(&multiproof, &proof_targets);
 
         let mut sparse_trie = SparseStateTrie::new();
         sparse_trie.reveal_decoded_multiproof_v2(multiproof)?;
@@ -224,8 +224,8 @@ where
                     self.hashed_cursor_factory.clone(),
                 )
                 .with_prefix_sets_mut(self.prefix_sets.clone())
-                .multiproof_v2(targets)?;
-                self.record_multiproof_nodes(&multiproof);
+                .multiproof_v2(targets.clone())?;
+                self.record_multiproof_nodes(&multiproof, &targets);
                 sparse_trie.reveal_decoded_multiproof_v2(multiproof)?;
             }
         }
@@ -297,8 +297,8 @@ where
                     self.hashed_cursor_factory.clone(),
                 )
                 .with_prefix_sets_mut(self.prefix_sets.clone())
-                .multiproof_v2(targets)?;
-                self.record_multiproof_nodes(&multiproof);
+                .multiproof_v2(targets.clone())?;
+                self.record_multiproof_nodes(&multiproof, &targets);
                 sparse_trie.reveal_decoded_multiproof_v2(multiproof)?;
             }
         }
@@ -313,26 +313,69 @@ where
     }
 
     /// Record all nodes from a V2 decoded multiproof in the witness.
-    fn record_multiproof_nodes(&mut self, multiproof: &DecodedMultiProofV2) {
+    fn record_multiproof_nodes(
+        &mut self,
+        multiproof: &DecodedMultiProofV2,
+        targets: &MultiProofTargetsV2,
+    ) {
         let mut encoded = Vec::new();
-        for proof_node in &multiproof.account_proofs {
-            self.record_witness_node(&proof_node.node, &mut encoded);
-        }
-        for proof_nodes in multiproof.storage_proofs.values() {
-            for proof_node in proof_nodes {
-                self.record_witness_node(&proof_node.node, &mut encoded);
-            }
+        self.record_proof_list(&multiproof.account_proofs, &targets.account_targets, &mut encoded);
+        for (hashed_address, proof_nodes) in &multiproof.storage_proofs {
+            let storage_targets =
+                targets.storage_targets.get(hashed_address).map(Vec::as_slice).unwrap_or(&[]);
+            self.record_proof_list(proof_nodes, storage_targets, &mut encoded);
         }
     }
 
+    fn record_proof_list(
+        &mut self,
+        proof_nodes: &[ProofTrieNodeV2],
+        proof_targets: &[ProofV2Target],
+        encoded: &mut Vec<u8>,
+    ) {
+        for proof_node in proof_nodes {
+            let include_bare_branch = self.should_record_bare_branch(proof_node, proof_targets);
+            self.record_witness_node(&proof_node.node, include_bare_branch, encoded);
+        }
+    }
+
+    fn should_record_bare_branch(
+        &self,
+        proof_node: &ProofTrieNodeV2,
+        proof_targets: &[ProofV2Target],
+    ) -> bool {
+        let TrieNodeV2::Branch(branch) = &proof_node.node else { return false };
+        if branch.key.is_empty() {
+            return false;
+        }
+
+        if !self.mode.is_canonical() {
+            return true;
+        }
+
+        let mut branch_path = proof_node.path.clone();
+        branch_path.extend(&branch.key);
+
+        proof_targets.iter().any(|target| {
+            branch_path.len() >= target.min_len as usize &&
+                target.key_nibbles.starts_with(&branch_path)
+        })
+    }
+
     /// Record a single [`TrieNodeV2`] in the witness.
-    fn record_witness_node(&mut self, node: &TrieNodeV2, encoded: &mut Vec<u8>) {
+    fn record_witness_node(
+        &mut self,
+        node: &TrieNodeV2,
+        include_bare_branch: bool,
+        encoded: &mut Vec<u8>,
+    ) {
         encoded.clear();
         node.encode(encoded);
         let bytes = Bytes::from(encoded.clone());
         self.witness.entry(keccak256(&bytes)).or_insert(bytes);
 
-        if let TrieNodeV2::Branch(branch) = node &&
+        if include_bare_branch &&
+            let TrieNodeV2::Branch(branch) = node &&
             !branch.key.is_empty()
         {
             encoded.clear();
@@ -371,7 +414,7 @@ where
         drop(calculator);
         if record_root_node {
             let mut encoded = Vec::new();
-            self.record_witness_node(&root_node.node, &mut encoded);
+            self.record_witness_node(&root_node.node, true, &mut encoded);
         }
         Ok(root_hash)
     }

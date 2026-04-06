@@ -77,16 +77,17 @@ impl ProofTrieNodeV2 {
                             last.path,
                             branch_v2.key
                         );
-                        branch_v2.key = ext.key;
-                        branch_v2.branch_rlp_node = Some(ext.child);
+                        branch_v2.key = ext.key.clone();
+                        branch_v2.branch_rlp_node = Some(ext.child.clone());
                         last.path = path;
+                        continue;
                     }
 
                     // If we reach here, the extension's child is not a branch in the
                     // result. This happens when the child branch is hashed (not revealed
-                    // in the proof). In V2 format, extension nodes are always combined
-                    // with their child branch, so we skip extension nodes whose child
-                    // isn't revealed.
+                    // in the proof). Preserve the standalone extension node so consumers
+                    // can still prove absence by divergence within the extension path.
+                    result.push(Self { path, node: TrieNodeV2::Extension(ext), masks });
                 }
             }
         }
@@ -110,9 +111,9 @@ pub enum TrieNodeV2 {
     Leaf(LeafNode),
     /// Variant representing an [`ExtensionNode`].
     ///
-    /// This will only be used for extension nodes for which child is not inlined. This variant
-    /// will never be produced by proof workers that will always reveal a full path to a requested
-    /// leaf.
+    /// This is used for extension nodes whose child is not inlined. Reth proof workers normally
+    /// reveal a full path to the requested leaf and therefore won't emit this directly, but
+    /// external flat witnesses may preserve standalone extension nodes without the child branch.
     Extension(ExtensionNode),
 }
 

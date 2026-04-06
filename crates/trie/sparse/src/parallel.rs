@@ -2150,6 +2150,10 @@ impl ParallelSparseTrie {
                 }
             }
             TrieNodeV2::Extension(ext) => {
+                if ext.child.is_hash() {
+                    return Ok(());
+                }
+
                 let mut child_path = path;
                 child_path.extend(&ext.key);
                 if let Some(subtrie) = self.lower_subtrie_for_path_mut(&child_path) {
@@ -2749,7 +2753,39 @@ impl SparseSubtrie {
                     branch.branch_rlp_node.clone(),
                 )?;
             }
-            TrieNodeV2::Extension(_) => unreachable!(),
+            TrieNodeV2::Extension(ext) => {
+                self.nodes.insert(
+                    path,
+                    SparseNode::Extension {
+                        key: ext.key,
+                        state: hash
+                            .as_ref()
+                            .map(|hash| SparseNodeState::Cached {
+                                rlp_node: RlpNode::word_rlp(hash),
+                                store_in_db_trie: Some(ext.child.is_hash()),
+                            })
+                            .unwrap_or(SparseNodeState::Dirty),
+                    },
+                );
+
+                if ext.child.is_hash() {
+                    return Ok(true);
+                }
+
+                let mut child_path = path;
+                child_path.extend(&ext.key);
+
+                if !Self::is_child_same_level(&path, &child_path) {
+                    return Ok(true);
+                }
+
+                self.reveal_node(
+                    child_path,
+                    &TrieNodeV2::decode(&mut ext.child.as_ref())?,
+                    None,
+                    None,
+                )?;
+            }
             TrieNodeV2::Leaf(leaf) => {
                 // Skip the reachability check when path.len() == UPPER_TRIE_MAX_DEPTH because
                 // at that boundary the leaf is in the lower subtrie but its parent branch is in

@@ -48,7 +48,7 @@ impl From<B256> for ProofV2Target {
 
 /// A set of account and storage V2 proof targets. The account and storage targets do not need to
 /// necessarily overlap.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct MultiProofTargetsV2 {
     /// The set of account proof targets to generate proofs for.
     pub account_targets: Vec<ProofV2Target>,

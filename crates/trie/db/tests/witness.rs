@@ -6,15 +6,16 @@ use alloy_primitives::{
     map::{HashMap, HashSet},
     Address, Bytes, B256, U256,
 };
-use alloy_rlp::EMPTY_STRING_CODE;
+use alloy_rlp::{Encodable, EMPTY_STRING_CODE};
 use reth_db::{cursor::DbCursorRW, tables};
 use reth_db_api::transaction::DbTxMut;
 use reth_primitives_traits::{Account, StorageEntry};
 use reth_provider::{test_utils::create_test_provider_factory, HashingWriter};
 use reth_storage_api::StorageSettingsCache;
 use reth_trie::{
-    proof::Proof, witness::TrieWitness, ExecutionWitnessMode, HashedPostState, HashedStorage,
-    LeafNode, MultiProofTargets, Nibbles, StateRoot, StorageRoot, TrieNodeV2,
+    proof::Proof, witness::TrieWitness, BranchNodeRef, ExecutionWitnessMode, HashedPostState,
+    HashedStorage, LeafNode, MultiProofTargets, MultiProofTargetsV2, Nibbles, ProofV2Target,
+    StateRoot, StorageRoot, TrieNodeV2,
 };
 use reth_trie_db::{
     DatabaseHashedCursorFactory, DatabaseProof, DatabaseStateRoot, DatabaseStorageRoot,
@@ -378,5 +379,104 @@ fn canonical_mode_handles_mixed_storage_inserts_and_removals() {
         assert!(canonical_witness.contains_key(&state_root));
         assert!(!canonical_witness.contains_key(&retained_leaf_hash));
         assert!(canonical_witness.iter().all(|(_, node)| node.as_ref() != [EMPTY_STRING_CODE]));
+    });
+}
+
+#[test]
+fn canonical_mode_skips_redundant_bare_branch_for_extension_only_absence_proof() {
+    let factory = create_test_provider_factory();
+    let provider = factory.provider_rw().unwrap();
+
+    let address = Address::random();
+    let hashed_address = keccak256(address);
+    let existing_slot_a = {
+        let mut bytes = [0u8; 32];
+        bytes[0] = 0xca;
+        bytes[1] = 0x10;
+        B256::from(bytes)
+    };
+    let existing_slot_b = {
+        let mut bytes = [0u8; 32];
+        bytes[0] = 0xca;
+        bytes[1] = 0x20;
+        B256::from(bytes)
+    };
+    let missing_slot = {
+        let mut bytes = [0u8; 32];
+        bytes[0] = 0xcb;
+        B256::from(bytes)
+    };
+
+    provider.insert_account_for_hashing([(address, Some(Account::default()))]).unwrap();
+    let mut hashed_storage_cursor =
+        provider.tx_ref().cursor_dup_write::<tables::HashedStorages>().unwrap();
+    hashed_storage_cursor
+        .upsert(hashed_address, &StorageEntry { key: existing_slot_a, value: U256::from(1) })
+        .unwrap();
+    hashed_storage_cursor
+        .upsert(hashed_address, &StorageEntry { key: existing_slot_b, value: U256::from(2) })
+        .unwrap();
+
+    reth_trie_db::with_adapter!(provider, |A| {
+        let mut proof_targets = MultiProofTargetsV2::default();
+        proof_targets.account_targets.push(ProofV2Target::new(hashed_address));
+        proof_targets
+            .storage_targets
+            .insert(hashed_address, vec![ProofV2Target::new(missing_slot)]);
+
+        let multiproof = Proof::new(
+            DatabaseTrieCursorFactory::<_, A>::new(provider.tx_ref()),
+            DatabaseHashedCursorFactory::new(provider.tx_ref()),
+        )
+        .multiproof_v2(proof_targets)
+        .unwrap();
+
+        let extension_branch = multiproof
+            .storage_proofs
+            .get(&hashed_address)
+            .unwrap()
+            .iter()
+            .find_map(|node| match &node.node {
+                TrieNodeV2::Branch(branch) if !branch.key.is_empty() => Some((node, branch)),
+                _ => None,
+            })
+            .unwrap();
+
+        let mut extension_bytes = Vec::new();
+        extension_branch.0.node.encode(&mut extension_bytes);
+        let extension_bytes = Bytes::from(extension_bytes);
+
+        let mut bare_branch_bytes = Vec::new();
+        BranchNodeRef::new(&extension_branch.1.stack, extension_branch.1.state_mask)
+            .encode(&mut bare_branch_bytes);
+        let bare_branch_bytes = Bytes::from(bare_branch_bytes);
+
+        let target_state = HashedPostState {
+            accounts: HashMap::from_iter([(hashed_address, Some(Account::default()))]),
+            storages: HashMap::from_iter([(
+                hashed_address,
+                HashedStorage::from_iter(false, [(missing_slot, U256::from(3))]),
+            )]),
+        };
+
+        let legacy_witness = TrieWitness::new(
+            DatabaseTrieCursorFactory::<_, A>::new(provider.tx_ref()),
+            DatabaseHashedCursorFactory::new(provider.tx_ref()),
+        )
+        .with_execution_witness_mode(ExecutionWitnessMode::Legacy)
+        .compute(target_state.clone())
+        .unwrap();
+        assert_eq!(legacy_witness.get(&keccak256(&extension_bytes)), Some(&extension_bytes));
+        assert_eq!(legacy_witness.get(&keccak256(&bare_branch_bytes)), Some(&bare_branch_bytes));
+
+        let canonical_witness = TrieWitness::new(
+            DatabaseTrieCursorFactory::<_, A>::new(provider.tx_ref()),
+            DatabaseHashedCursorFactory::new(provider.tx_ref()),
+        )
+        .with_execution_witness_mode(ExecutionWitnessMode::Canonical)
+        .compute(target_state)
+        .unwrap();
+        assert_eq!(canonical_witness.get(&keccak256(&extension_bytes)), Some(&extension_bytes));
+        assert!(!canonical_witness.contains_key(&keccak256(&bare_branch_bytes)));
     });
 }
