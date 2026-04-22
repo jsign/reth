@@ -2,7 +2,10 @@ use alloy_consensus::{
     transaction::{Recovered, TxHashRef},
     BlockHeader, Transaction,
 };
-use alloy_evm::{block::BlockExecutor, evm::EvmFactoryExt};
+use alloy_evm::{
+    block::{BlockExecutor, TxResult},
+    Evm,
+};
 use alloy_primitives::{Address, B256};
 use arrow::{
     array::{
@@ -486,50 +489,70 @@ pub fn scan_archive(config: ScanConfig) -> eyre::Result<ScanSummary> {
                             let evm_env = evm_config
                                 .evm_env(block.header())
                                 .expect("ethereum evm environment construction is infallible");
-                            evm_config
-                                .executor_for_block(&mut db, block.sealed_block())
-                                .expect("ethereum block executor construction is infallible")
-                                .apply_pre_execution_changes()
-                                .wrap_err_with(|| {
-                                    format!(
-                                        "failed to apply pre-execution changes for block {}",
-                                        block.number()
-                                    )
-                                })?;
-
-                            let mut tx_index = 0u64;
-                            let mut tracer = evm_config.evm_factory().create_tracer(
+                            let execution_ctx = evm_config
+                                .context_for_block(block.sealed_block())
+                                .expect("ethereum block execution context construction is infallible");
+                            let evm = evm_config.evm_with_env_and_inspector(
                                 &mut db,
                                 evm_env,
                                 BlockhashImpactInspector::default(),
                             );
-                            for result in tracer
-                                .try_trace_many(block.clone_transactions_recovered(), |mut ctx| {
-                                    stats.txs_scanned += 1;
-                                    let rows = ctx.take_inspector().into_rows(
-                                        block_context,
-                                        transaction_metadata(tx_index, &ctx.tx),
-                                        &ctx.result,
-                                    );
-                                    tx_index += 1;
+                            let mut executor = evm_config.create_executor(evm, execution_ctx);
 
-                                    if !rows.is_empty() {
-                                        stats.txs_with_blockhash += 1;
-                                        stats.record_rows(&rows);
-                                        buffered_rows.extend(rows);
-                                        if buffered_rows.len() >= flush_rows {
-                                            row_tx
-                                                .send(std::mem::take(&mut buffered_rows))
-                                                .wrap_err(
-                                                    "failed to send row batch to writer",
-                                                )?;
-                                        }
+                            executor.apply_pre_execution_changes().wrap_err_with(|| {
+                                format!(
+                                    "failed to apply pre-execution changes for block {}",
+                                    block.number()
+                                )
+                            })?;
+
+                            for (tx_index, tx) in block.clone_transactions_recovered().enumerate() {
+                                stats.txs_scanned += 1;
+                                let tx_index = tx_index as u64;
+                                let tx_metadata = transaction_metadata(tx_index, &tx);
+                                let tx_result = executor
+                                    .execute_transaction_without_commit(tx)
+                                    .wrap_err_with(|| {
+                                        format!(
+                                            "failed to execute transaction {tx_index} in block {}",
+                                            block.number()
+                                        )
+                                    })?;
+
+                                // Reset the inspector before committing so each transaction gets
+                                // isolated trace rows while block state still advances normally.
+                                let rows = std::mem::take(executor.evm_mut().inspector_mut())
+                                    .into_rows(
+                                        block_context,
+                                        tx_metadata,
+                                        &tx_result.result().result,
+                                    );
+
+                                if !rows.is_empty() {
+                                    stats.txs_with_blockhash += 1;
+                                    stats.record_rows(&rows);
+                                    buffered_rows.extend(rows);
+                                    if buffered_rows.len() >= flush_rows {
+                                        row_tx
+                                            .send(std::mem::take(&mut buffered_rows))
+                                            .wrap_err("failed to send row batch to writer")?;
                                     }
-                                    Ok::<_, eyre::Report>(())
-                                })
-                            {
-                                result?;
+                                }
+
+                                executor.commit_transaction(tx_result).wrap_err_with(|| {
+                                    format!(
+                                        "failed to commit transaction {tx_index} in block {}",
+                                        block.number()
+                                    )
+                                })?;
                             }
+
+                            executor.apply_post_execution_changes().wrap_err_with(|| {
+                                format!(
+                                    "failed to apply post-execution changes for block {}",
+                                    block.number()
+                                )
+                            })?;
                         }
                     }
 
