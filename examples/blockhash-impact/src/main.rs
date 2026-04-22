@@ -32,6 +32,12 @@ struct Cli {
     /// Number of rows a worker buffers before flushing to the writer thread.
     #[arg(long, default_value_t = 10_000)]
     flush_rows: usize,
+
+    /// Verify replayed execution against canonical block outputs and state roots.
+    ///
+    /// This is significantly slower and uses more memory per worker.
+    #[arg(long)]
+    verify_execution: bool,
 }
 
 fn main() -> eyre::Result<()> {
@@ -44,6 +50,7 @@ fn main() -> eyre::Result<()> {
         jobs: cli.jobs,
         blocks_per_chunk: cli.blocks_per_chunk,
         flush_rows: cli.flush_rows,
+        verify_execution: cli.verify_execution,
     })?;
 
     println!(

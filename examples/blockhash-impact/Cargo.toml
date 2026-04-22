@@ -8,11 +8,13 @@ license.workspace = true
 [dependencies]
 reth-chainspec.workspace = true
 reth-ethereum = { workspace = true, features = ["evm", "node"] }
+reth-ethereum-consensus.workspace = true
 reth-evm.workspace = true
 reth-fs-util.workspace = true
 reth-primitives-traits.workspace = true
 reth-provider.workspace = true
 reth-revm.workspace = true
+reth-storage-api.workspace = true
 reth-tasks.workspace = true
 
 alloy-consensus.workspace = true
