@@ -16,8 +16,9 @@ use arrow::{
 };
 use eyre::{Context as _, ContextCompat};
 use parquet::{arrow::ArrowWriter, basic::Compression, file::properties::WriterProperties};
-use reth_chainspec::MAINNET;
+use reth_chainspec::{EthereumHardforks, MAINNET};
 use reth_ethereum::{evm::EthEvmConfig, node::EthereumNode};
+use reth_ethereum_consensus::validate_block_post_execution;
 use reth_evm::ConfigureEvm;
 use reth_fs_util as fs;
 use reth_provider::{providers::ReadOnlyConfig, BlockNumReader, BlockReader, ChainSpecProvider};
@@ -36,6 +37,7 @@ use reth_revm::{
         },
     },
 };
+use reth_storage_api::{HashedPostStateProvider, StateRootProvider};
 use reth_tasks::Runtime;
 use std::{
     fmt,
@@ -61,6 +63,7 @@ pub struct ScanConfig {
     pub jobs: Option<usize>,
     pub blocks_per_chunk: u64,
     pub flush_rows: usize,
+    pub verify_execution: bool,
 }
 
 /// Runtime summary emitted after a completed scan.
@@ -472,9 +475,14 @@ pub fn scan_archive(config: ScanConfig) -> eyre::Result<ScanSummary> {
                             .checked_sub(1)
                             .wrap_err("cannot initialize chunk state before genesis")?;
                         let state_provider = provider_factory.history_by_block_number(parent_block)?;
-                        let mut db = State::builder()
-                            .with_database(StateProviderDatabase::new(state_provider))
-                            .build();
+                        let mut db_builder =
+                            State::builder().with_database(StateProviderDatabase::new(state_provider));
+                        if config.verify_execution {
+                            // Track cumulative bundle updates only when verification needs
+                            // canonical state-root checks.
+                            db_builder = db_builder.with_bundle_update();
+                        }
+                        let mut db = db_builder.build();
 
                         for block in blocks {
                             if cancelled.load(Ordering::Relaxed) {
@@ -547,12 +555,26 @@ pub fn scan_archive(config: ScanConfig) -> eyre::Result<ScanSummary> {
                                 })?;
                             }
 
-                            executor.apply_post_execution_changes().wrap_err_with(|| {
-                                format!(
-                                    "failed to apply post-execution changes for block {}",
-                                    block.number()
-                                )
-                            })?;
+                            let execution_result =
+                                executor.apply_post_execution_changes().wrap_err_with(|| {
+                                    format!(
+                                        "failed to apply post-execution changes for block {}",
+                                        block.number()
+                                    )
+                                })?;
+
+                            if config.verify_execution {
+                                db.merge_transitions(
+                                    revm::database::states::bundle_state::BundleRetention::PlainState,
+                                );
+                                verify_block_execution(
+                                    &block,
+                                    evm_config.chain_spec().as_ref(),
+                                    db.database.as_ref(),
+                                    &db.bundle_state,
+                                    &execution_result,
+                                )?;
+                            }
                         }
                     }
 
@@ -612,6 +634,51 @@ pub fn scan_archive(config: ScanConfig) -> eyre::Result<ScanSummary> {
         elapsed: started_at.elapsed(),
         output: config.output,
     })
+}
+
+fn verify_block_execution<B, R, ChainSpec, StateProvider>(
+    block: &reth_primitives_traits::RecoveredBlock<B>,
+    chain_spec: &ChainSpec,
+    state_provider: &StateProvider,
+    bundle_state: &reth_revm::db::BundleState,
+    execution_result: &alloy_evm::block::BlockExecutionResult<R>,
+) -> eyre::Result<()>
+where
+    B: reth_primitives_traits::Block,
+    R: reth_primitives_traits::Receipt,
+    ChainSpec: EthereumHardforks,
+    StateProvider: HashedPostStateProvider + StateRootProvider,
+{
+    validate_block_post_execution(block, chain_spec, execution_result, None).wrap_err_with(
+        || {
+            format!(
+                "replayed execution result mismatched canonical header for block {}",
+                block.number()
+            )
+        },
+    )?;
+
+    let expected_blob_gas_used = block.header().blob_gas_used().unwrap_or_default();
+    eyre::ensure!(
+        execution_result.blob_gas_used == expected_blob_gas_used,
+        "blob gas used mismatch for block {}: got {}, expected {}",
+        block.number(),
+        execution_result.blob_gas_used,
+        expected_blob_gas_used,
+    );
+
+    let state_root = state_provider
+        .state_root(state_provider.hashed_post_state(bundle_state))
+        .wrap_err_with(|| format!("failed to compute state root for block {}", block.number()))?;
+    eyre::ensure!(
+        state_root == block.header().state_root(),
+        "state root mismatch for block {}: got {:?}, expected {:?}",
+        block.number(),
+        state_root,
+        block.header().state_root(),
+    );
+
+    Ok(())
 }
 
 fn write_rows(
