@@ -39,6 +39,7 @@ See examples in a [dedicated repository](https://github.com/paradigmxyz/reth-exe
 | Example                  | Description                                                     |
 | ------------------------ | --------------------------------------------------------------- |
 | [DB access](./db-access) | Illustrates how to access Reth's database in a separate process |
+| [BLOCKHASH impact](./blockhash-impact) | Replays archive blocks and writes one Parquet row per executed `BLOCKHASH` |
 
 ## Network
 
