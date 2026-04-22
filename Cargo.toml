@@ -120,6 +120,7 @@ members = [
     "crates/trie/trie",
     "examples/beacon-api-sidecar-fetcher/",
     "examples/beacon-api-sse/",
+    "examples/blockhash-impact",
     "examples/bsc-p2p",
     "examples/custom-dev-node/",
     "examples/custom-engine-types/",

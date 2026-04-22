@@ -1,0 +1,28 @@
+[package]
+name = "example-blockhash-impact"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+reth-chainspec.workspace = true
+reth-ethereum = { workspace = true, features = ["evm", "node"] }
+reth-evm.workspace = true
+reth-fs-util.workspace = true
+reth-primitives-traits.workspace = true
+reth-provider.workspace = true
+reth-revm.workspace = true
+reth-tasks.workspace = true
+
+alloy-consensus.workspace = true
+alloy-evm.workspace = true
+alloy-primitives.workspace = true
+clap = { workspace = true, features = ["derive"] }
+eyre.workspace = true
+
+arrow = "57.0.0"
+parquet = { version = "57.0.0", default-features = false, features = ["arrow", "snap"] }
+
+[dev-dependencies]
+tempfile.workspace = true
