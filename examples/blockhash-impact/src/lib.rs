@@ -399,7 +399,7 @@ pub fn scan_archive(config: ScanConfig) -> eyre::Result<ScanSummary> {
     let runtime = Runtime::test();
     let provider_factory = EthereumNode::provider_factory_builder().open_read_only(
         MAINNET.clone(),
-        ReadOnlyConfig::from_datadir(&config.datadir),
+        ReadOnlyConfig::from_datadir(&config.datadir).disable_long_read_transaction_safety(),
         runtime,
     )?;
 
