@@ -40,6 +40,7 @@ use reth_revm::{
 use reth_storage_api::{HashedPostStateProvider, StateRootProvider};
 use reth_tasks::Runtime;
 use std::{
+    collections::HashSet,
     fmt,
     fs::File,
     path::PathBuf,
@@ -51,7 +52,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-const CURRENT_BLOCKHASH_COST: u64 = 20;
+pub mod analyze;
+pub mod eip7709;
+
+use eip7709::{
+    is_in_window as eip7709_is_in_window, slot_index as eip7709_slot_index, WarmthClass,
+    BASE_BLOCKHASH_COST,
+};
+
+const CURRENT_BLOCKHASH_COST: u64 = BASE_BLOCKHASH_COST;
 
 /// Scanner configuration.
 #[derive(Debug, Clone)]
@@ -64,6 +73,9 @@ pub struct ScanConfig {
     pub blocks_per_chunk: u64,
     pub flush_rows: usize,
     pub verify_execution: bool,
+    /// When true, inject EIP-7709 SLOAD-equivalent gas at every BLOCKHASH step. Mutually
+    /// exclusive with `verify_execution` because gas injection diverges canonical state.
+    pub simulate_eip7709: bool,
 }
 
 /// Runtime summary emitted after a completed scan.
@@ -76,6 +88,9 @@ pub struct ScanSummary {
     pub txs_with_blockhash: u64,
     pub blockhash_events: u64,
     pub min_observed_gas_before: Option<u64>,
+    /// Chunks abandoned mid-execution under `--simulate-eip7709`. Their remaining blocks are
+    /// missing from the parquet output and analysis should treat the file as a sparse subset.
+    pub chunks_aborted: u64,
     pub elapsed: Duration,
     pub output: PathBuf,
 }
@@ -138,6 +153,21 @@ pub struct BlockhashRow {
     pub gas_after: u64,
     pub observed_gas_cost: u64,
     pub extra_gas_headroom: i64,
+    /// `requested_block_number % HISTORY_SERVE_WINDOW` — None when `requested_block_number` is.
+    pub slot_index: Option<u64>,
+    /// `delta in [1, 256]` — calls outside this window pay no SLOAD under EIP-7709.
+    pub is_in_window: bool,
+    /// `"cold" | "warm" | "out_of_window" | "unknown"` per [`WarmthClass`].
+    pub slot_warmth_class: String,
+    /// SLOAD-equivalent extra gas (2100 cold, 100 warm, 0 otherwise) charged on top of the base
+    /// 20.
+    pub eip7709_extra_cost: u64,
+    /// Total EIP-7709 cost: `BASE_BLOCKHASH_COST + eip7709_extra_cost`.
+    pub eip7709_new_cost: u64,
+    /// `gas_before - eip7709_new_cost`; negative means the frame would not afford this BLOCKHASH.
+    pub eip7709_new_headroom: i64,
+    /// `true` iff the frame would OOG at this BLOCKHASH under EIP-7709 (`gas_before < new_cost`).
+    pub eip7709_would_oog_frame: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -148,9 +178,27 @@ pub struct BlockhashImpactInspector {
     frames: Vec<FrameRecord>,
     events: Vec<BlockhashEventRecord>,
     pending_blockhash: Option<PendingBlockhash>,
+    /// When true, charges EIP-7709 SLOAD-equivalent gas at every BLOCKHASH and triggers OOG via
+    /// `Interpreter::halt_oog` on insufficient gas; otherwise observation-only.
+    inject_eip7709: bool,
+    /// Per-tx slot warmth simulation. When `inject_eip7709` is on, this mirrors the journal's
+    /// access list (we still use `ctx.sload` for the authoritative `is_cold`); when off, this is
+    /// the only warmth source. Reset every tx via [`Self::reset_for_next_tx`].
+    warmth_set: HashSet<u64>,
 }
 
 impl BlockhashImpactInspector {
+    /// Constructs an inspector. `inject_eip7709 == true` simulates the new BLOCKHASH cost model in
+    /// revm; `false` records canonical execution and only annotates rows with classification.
+    pub fn new(inject_eip7709: bool) -> Self {
+        Self { inject_eip7709, ..Self::default() }
+    }
+
+    /// Whether this inspector charges EIP-7709 SLOAD gas during execution.
+    pub fn inject_eip7709(&self) -> bool {
+        self.inject_eip7709
+    }
+
     pub fn into_rows<H>(
         mut self,
         block: BlockExecutionContext,
@@ -177,6 +225,12 @@ impl BlockhashImpactInspector {
                     .find(|frame| frame.id == event.frame_id)
                     .expect("event frame is tracked");
 
+                let eip7709_extra_cost = event.warmth_class.extra_cost();
+                let eip7709_new_cost = event.warmth_class.total_cost();
+                let eip7709_new_headroom =
+                    i64::try_from(event.gas_before).unwrap_or(i64::MAX) - eip7709_new_cost as i64;
+                let eip7709_would_oog_frame = event.gas_before < eip7709_new_cost;
+
                 BlockhashRow {
                     block_number: block.block_number,
                     block_hash: hex(block.block_hash),
@@ -202,13 +256,18 @@ impl BlockhashImpactInspector {
                     frame_end_status: frame.end_status.clone(),
                     pc: event.pc,
                     requested_block_number: event.requested_block_number,
-                    requested_block_delta: event
-                        .requested_block_number
-                        .and_then(|requested| block_number_delta(block.block_number, requested)),
+                    requested_block_delta: event.requested_block_delta,
                     gas_before: event.gas_before,
                     gas_after: event.gas_after,
                     observed_gas_cost: event.observed_gas_cost,
                     extra_gas_headroom: gas_headroom(event.gas_before),
+                    slot_index: event.slot_index,
+                    is_in_window: event.is_in_window,
+                    slot_warmth_class: event.warmth_class.as_str().to_string(),
+                    eip7709_extra_cost,
+                    eip7709_new_cost,
+                    eip7709_new_headroom,
+                    eip7709_would_oog_frame,
                 }
             })
             .collect()
@@ -296,7 +355,7 @@ where
         );
     }
 
-    fn step(&mut self, interp: &mut Interpreter, _context: &mut CTX) {
+    fn step(&mut self, interp: &mut Interpreter, context: &mut CTX) {
         if interp.bytecode.opcode() != opcode::BLOCKHASH {
             return;
         }
@@ -307,15 +366,71 @@ where
 
         let requested_block_number =
             interp.stack.peek(0).ok().and_then(|number| u64::try_from(number).ok());
+        let block_number = u64::try_from(context.block_number()).unwrap_or(u64::MAX);
+        let requested_block_delta = requested_block_number
+            .and_then(|requested| block_number_delta(block_number, requested));
+        let in_window = requested_block_delta.is_some_and(eip7709_is_in_window);
+        let slot = requested_block_number.map(eip7709_slot_index);
+
+        // Classify slot warmth via a per-tx `HashSet`. We don't consult `ctx.sload` because the
+        // host trait's `sload` requires the account to be already loaded (it returns
+        // `ColdLoadSkipped` otherwise), and `HISTORY_STORAGE_ADDRESS` is never touched by any
+        // canonical user-code instruction — so the simulation matches what an EIP-7709-aware EVM
+        // would observe.
+        let warmth_class = if !in_window {
+            WarmthClass::OutOfWindow
+        } else if let Some(slot) = slot {
+            if self.warmth_set.insert(slot) {
+                WarmthClass::Cold
+            } else {
+                WarmthClass::Warm
+            }
+        } else {
+            WarmthClass::Unknown
+        };
+
+        let gas_before = interp.gas.remaining();
+        let event_index = self.next_event_index;
+        self.next_event_index += 1;
+        let pc = interp.bytecode.pc() as u64;
+
+        // EIP-7709 charges `BASE + SLOAD-equivalent`. revm's instruction table charges the BASE
+        // (20) inside `Interpreter::step` AFTER this hook runs, so we only need to inject the
+        // SLOAD-equivalent extra here. If the frame can't afford it, halt with OOG and let revm
+        // unwind the call frame canonically. Note: when `halt_oog` is called the inspector loop
+        // breaks BEFORE `step_end` fires, so we must push the event row here directly.
+        if self.inject_eip7709 {
+            let extra = warmth_class.extra_cost();
+            if extra > 0 && !interp.gas.record_regular_cost(extra) {
+                interp.halt_oog();
+                self.events.push(BlockhashEventRecord {
+                    frame_id,
+                    event_index,
+                    pc,
+                    requested_block_number,
+                    requested_block_delta,
+                    slot_index: slot,
+                    is_in_window: in_window,
+                    warmth_class,
+                    gas_before,
+                    gas_after: 0,
+                    observed_gas_cost: gas_before,
+                });
+                return;
+            }
+        }
 
         self.pending_blockhash = Some(PendingBlockhash {
             frame_id,
-            event_index: self.next_event_index,
-            pc: interp.bytecode.pc() as u64,
+            event_index,
+            pc,
             requested_block_number,
-            gas_before: interp.gas.remaining(),
+            requested_block_delta,
+            slot_index: slot,
+            is_in_window: in_window,
+            warmth_class,
+            gas_before,
         });
-        self.next_event_index += 1;
     }
 
     fn step_end(&mut self, interp: &mut Interpreter, _context: &mut CTX) {
@@ -329,6 +444,10 @@ where
             event_index: pending.event_index,
             pc: pending.pc,
             requested_block_number: pending.requested_block_number,
+            requested_block_delta: pending.requested_block_delta,
+            slot_index: pending.slot_index,
+            is_in_window: pending.is_in_window,
+            warmth_class: pending.warmth_class,
             gas_before: pending.gas_before,
             gas_after,
             observed_gas_cost: pending.gas_before.saturating_sub(gas_after),
@@ -470,7 +589,7 @@ pub fn scan_archive(config: ScanConfig) -> eyre::Result<ScanSummary> {
                     let mut stats = WorkerStats::default();
                     let mut buffered_rows = Vec::with_capacity(flush_rows.max(1));
 
-                    loop {
+                    'chunks: loop {
                         if cancelled.load(Ordering::Relaxed) {
                             break;
                         }
@@ -510,94 +629,139 @@ pub fn scan_archive(config: ScanConfig) -> eyre::Result<ScanSummary> {
                                 break;
                             }
 
-                            stats.blocks_scanned += 1;
                             let block_context = BlockExecutionContext {
                                 block_number: block.number(),
                                 block_hash: block.hash(),
                             };
-                            let evm_env = evm_config
-                                .evm_env(block.header())
-                                .expect("ethereum evm environment construction is infallible");
-                            let execution_ctx = evm_config
-                                .context_for_block(block.sealed_block())
-                                .expect("ethereum block execution context construction is infallible");
-                            let evm = evm_config.evm_with_env_and_inspector(
-                                &mut db,
-                                evm_env,
-                                BlockhashImpactInspector::default(),
-                            );
-                            let mut executor = evm_config.create_executor(evm, execution_ctx);
 
-                            executor.apply_pre_execution_changes().wrap_err_with(|| {
-                                format!(
-                                    "failed to apply pre-execution changes for block {}",
-                                    block.number()
-                                )
-                            })?;
+                            // Per-block scratch state. Rows and stat deltas land in `stats` /
+                            // `buffered_rows` only on success — under `--simulate-eip7709`, state
+                            // divergence can cause a tx mid-block to fail with e.g. block-budget
+                            // overflow, in which case we discard this block's data and abandon the
+                            // rest of the chunk (db is dirty after a partial block).
+                            let mut block_rows: Vec<BlockhashRow> = Vec::new();
+                            let mut block_txs_scanned: u64 = 0;
+                            let mut block_txs_with_blockhash: u64 = 0;
 
-                            for (tx_index, tx) in block.clone_transactions_recovered().enumerate() {
-                                stats.txs_scanned += 1;
-                                let tx_index = tx_index as u64;
-                                let tx_metadata = transaction_metadata(tx_index, &tx);
-                                let tx_result = executor
-                                    .execute_transaction_without_commit(tx)
-                                    .wrap_err_with(|| {
+                            let block_result: eyre::Result<()> = (|| {
+                                // Scope the executor so its `&mut db` borrow ends before the
+                                // optional verify branch needs `&mut db`.
+                                let execution_result = {
+                                    let evm_env = evm_config.evm_env(block.header()).expect(
+                                        "ethereum evm environment construction is infallible",
+                                    );
+                                    let execution_ctx = evm_config
+                                        .context_for_block(block.sealed_block())
+                                        .expect(
+                                            "ethereum block execution context construction is infallible",
+                                        );
+                                    let evm = evm_config.evm_with_env_and_inspector(
+                                        &mut db,
+                                        evm_env,
+                                        BlockhashImpactInspector::new(config.simulate_eip7709),
+                                    );
+                                    let mut executor =
+                                        evm_config.create_executor(evm, execution_ctx);
+
+                                    executor.apply_pre_execution_changes().wrap_err_with(|| {
                                         format!(
-                                            "failed to execute transaction {tx_index} in block {}",
+                                            "failed to apply pre-execution changes for block {}",
                                             block.number()
                                         )
                                     })?;
 
-                                // Reset the inspector before committing so each transaction gets
-                                // isolated trace rows while block state still advances normally.
-                                let rows = std::mem::take(executor.evm_mut().inspector_mut())
-                                    .into_rows(
-                                        block_context,
-                                        tx_metadata,
-                                        &tx_result.result().result,
-                                    );
+                                    for (tx_index, tx) in
+                                        block.clone_transactions_recovered().enumerate()
+                                    {
+                                        block_txs_scanned += 1;
+                                        let tx_index = tx_index as u64;
+                                        let tx_metadata = transaction_metadata(tx_index, &tx);
+                                        let tx_result = executor
+                                            .execute_transaction_without_commit(tx)
+                                            .wrap_err_with(|| {
+                                                format!(
+                                                    "failed to execute transaction {tx_index} in block {}",
+                                                    block.number()
+                                                )
+                                            })?;
 
-                                if !rows.is_empty() {
-                                    stats.txs_with_blockhash += 1;
-                                    stats.record_rows(&rows);
-                                    buffered_rows.extend(rows);
+                                        // Replace the inspector with a fresh one carrying the
+                                        // same injection flag so each tx gets isolated trace rows
+                                        // and a fresh per-tx warmth set, while block state still
+                                        // advances normally.
+                                        let rows = std::mem::replace(
+                                            executor.evm_mut().inspector_mut(),
+                                            BlockhashImpactInspector::new(config.simulate_eip7709),
+                                        )
+                                        .into_rows(
+                                            block_context,
+                                            tx_metadata,
+                                            &tx_result.result().result,
+                                        );
+
+                                        if !rows.is_empty() {
+                                            block_txs_with_blockhash += 1;
+                                            block_rows.extend(rows);
+                                        }
+
+                                        executor.commit_transaction(tx_result).wrap_err_with(
+                                            || {
+                                                format!(
+                                                    "failed to commit transaction {tx_index} in block {}",
+                                                    block.number()
+                                                )
+                                            },
+                                        )?;
+                                    }
+
+                                    executor.apply_post_execution_changes().wrap_err_with(|| {
+                                        format!(
+                                            "failed to apply post-execution changes for block {}",
+                                            block.number()
+                                        )
+                                    })?
+                                };
+
+                                if config.verify_execution {
+                                    db.merge_transitions(
+                                        revm::database::states::bundle_state::BundleRetention::PlainState,
+                                    );
+                                    verify_block_execution(
+                                        &block,
+                                        evm_config.chain_spec().as_ref(),
+                                        db.database.as_ref(),
+                                        &db.bundle_state,
+                                        &execution_result,
+                                    )?;
+                                }
+
+                                Ok(())
+                            })();
+
+                            match block_result {
+                                Ok(()) => {
+                                    stats.blocks_scanned += 1;
+                                    stats.txs_scanned += block_txs_scanned;
+                                    stats.txs_with_blockhash += block_txs_with_blockhash;
+                                    stats.record_rows(&block_rows);
+                                    buffered_rows.extend(block_rows);
                                     if buffered_rows.len() >= flush_rows {
                                         row_tx
                                             .send(std::mem::take(&mut buffered_rows))
                                             .wrap_err("failed to send row batch to writer")?;
                                     }
+                                    blocks_completed.fetch_add(1, Ordering::Relaxed);
                                 }
-
-                                executor.commit_transaction(tx_result).wrap_err_with(|| {
-                                    format!(
-                                        "failed to commit transaction {tx_index} in block {}",
+                                Err(err) if config.simulate_eip7709 => {
+                                    eprintln!(
+                                        "[simulate-eip7709] aborting chunk {chunk_start}..={chunk_end} at block {} due to state divergence: {err:#}",
                                         block.number()
-                                    )
-                                })?;
+                                    );
+                                    stats.chunks_aborted += 1;
+                                    continue 'chunks;
+                                }
+                                Err(err) => return Err(err),
                             }
-
-                            let execution_result =
-                                executor.apply_post_execution_changes().wrap_err_with(|| {
-                                    format!(
-                                        "failed to apply post-execution changes for block {}",
-                                        block.number()
-                                    )
-                                })?;
-
-                            if config.verify_execution {
-                                db.merge_transitions(
-                                    revm::database::states::bundle_state::BundleRetention::PlainState,
-                                );
-                                verify_block_execution(
-                                    &block,
-                                    evm_config.chain_spec().as_ref(),
-                                    db.database.as_ref(),
-                                    &db.bundle_state,
-                                    &execution_result,
-                                )?;
-                            }
-
-                            blocks_completed.fetch_add(1, Ordering::Relaxed);
                         }
                     }
 
@@ -660,6 +824,7 @@ pub fn scan_archive(config: ScanConfig) -> eyre::Result<ScanSummary> {
         txs_with_blockhash: aggregate.txs_with_blockhash,
         blockhash_events: aggregate.blockhash_events,
         min_observed_gas_before: aggregate.min_observed_gas_before,
+        chunks_aborted: aggregate.chunks_aborted,
         elapsed: started_at.elapsed(),
         output: config.output,
     })
@@ -833,6 +998,12 @@ fn validate_config(config: &ScanConfig) -> eyre::Result<()> {
     if config.from > config.to {
         eyre::bail!("--from ({}) is greater than --to ({})", config.from, config.to);
     }
+    if config.simulate_eip7709 && config.verify_execution {
+        eyre::bail!(
+            "--simulate-eip7709 cannot be combined with --verify-execution: \
+             gas injection diverges canonical state, which breaks state-root validation"
+        );
+    }
 
     Ok(())
 }
@@ -883,6 +1054,13 @@ fn row_schema() -> Schema {
         Field::new("gas_after", DataType::UInt64, false),
         Field::new("observed_gas_cost", DataType::UInt64, false),
         Field::new("extra_gas_headroom", DataType::Int64, false),
+        Field::new("slot_index", DataType::UInt64, true),
+        Field::new("is_in_window", DataType::Boolean, false),
+        Field::new("slot_warmth_class", DataType::Utf8, false),
+        Field::new("eip7709_extra_cost", DataType::UInt64, false),
+        Field::new("eip7709_new_cost", DataType::UInt64, false),
+        Field::new("eip7709_new_headroom", DataType::Int64, false),
+        Field::new("eip7709_would_oog_frame", DataType::Boolean, false),
     ])
 }
 
@@ -917,6 +1095,13 @@ fn rows_to_record_batch(rows: Vec<BlockhashRow>, schema: Arc<Schema>) -> eyre::R
     let mut gas_after = Vec::with_capacity(capacity);
     let mut observed_gas_cost = Vec::with_capacity(capacity);
     let mut extra_gas_headroom = Vec::with_capacity(capacity);
+    let mut slot_index = Vec::with_capacity(capacity);
+    let mut is_in_window = Vec::with_capacity(capacity);
+    let mut slot_warmth_class = Vec::with_capacity(capacity);
+    let mut eip7709_extra_cost = Vec::with_capacity(capacity);
+    let mut eip7709_new_cost = Vec::with_capacity(capacity);
+    let mut eip7709_new_headroom = Vec::with_capacity(capacity);
+    let mut eip7709_would_oog_frame = Vec::with_capacity(capacity);
 
     for row in rows {
         block_number.push(row.block_number);
@@ -948,6 +1133,13 @@ fn rows_to_record_batch(rows: Vec<BlockhashRow>, schema: Arc<Schema>) -> eyre::R
         gas_after.push(row.gas_after);
         observed_gas_cost.push(row.observed_gas_cost);
         extra_gas_headroom.push(row.extra_gas_headroom);
+        slot_index.push(row.slot_index);
+        is_in_window.push(row.is_in_window);
+        slot_warmth_class.push(row.slot_warmth_class);
+        eip7709_extra_cost.push(row.eip7709_extra_cost);
+        eip7709_new_cost.push(row.eip7709_new_cost);
+        eip7709_new_headroom.push(row.eip7709_new_headroom);
+        eip7709_would_oog_frame.push(row.eip7709_would_oog_frame);
     }
 
     let columns: Vec<ArrayRef> = vec![
@@ -980,6 +1172,13 @@ fn rows_to_record_batch(rows: Vec<BlockhashRow>, schema: Arc<Schema>) -> eyre::R
         Arc::new(UInt64Array::from(gas_after)),
         Arc::new(UInt64Array::from(observed_gas_cost)),
         Arc::new(Int64Array::from(extra_gas_headroom)),
+        Arc::new(UInt64Array::from(slot_index)),
+        Arc::new(BooleanArray::from(is_in_window)),
+        Arc::new(StringArray::from(slot_warmth_class)),
+        Arc::new(UInt64Array::from(eip7709_extra_cost)),
+        Arc::new(UInt64Array::from(eip7709_new_cost)),
+        Arc::new(Int64Array::from(eip7709_new_headroom)),
+        Arc::new(BooleanArray::from(eip7709_would_oog_frame)),
     ];
 
     RecordBatch::try_new(schema, columns).wrap_err("failed to assemble arrow record batch")
@@ -1034,6 +1233,10 @@ struct BlockhashEventRecord {
     event_index: u64,
     pc: u64,
     requested_block_number: Option<u64>,
+    requested_block_delta: Option<i64>,
+    slot_index: Option<u64>,
+    is_in_window: bool,
+    warmth_class: WarmthClass,
     gas_before: u64,
     gas_after: u64,
     observed_gas_cost: u64,
@@ -1045,6 +1248,10 @@ struct PendingBlockhash {
     event_index: u64,
     pc: u64,
     requested_block_number: Option<u64>,
+    requested_block_delta: Option<i64>,
+    slot_index: Option<u64>,
+    is_in_window: bool,
+    warmth_class: WarmthClass,
     gas_before: u64,
 }
 
@@ -1082,6 +1289,10 @@ struct WorkerStats {
     txs_with_blockhash: u64,
     blockhash_events: u64,
     min_observed_gas_before: Option<u64>,
+    /// Chunks abandoned mid-execution under `--simulate-eip7709` because state divergence caused
+    /// a tx to fail (e.g. block-budget overflow). The remaining blocks in those chunks are
+    /// missing from the parquet output.
+    chunks_aborted: u64,
 }
 
 impl WorkerStats {
@@ -1100,6 +1311,7 @@ impl WorkerStats {
         self.txs_scanned += other.txs_scanned;
         self.txs_with_blockhash += other.txs_with_blockhash;
         self.blockhash_events += other.blockhash_events;
+        self.chunks_aborted += other.chunks_aborted;
         self.min_observed_gas_before =
             match (self.min_observed_gas_before, other.min_observed_gas_before) {
                 (Some(left), Some(right)) => Some(left.min(right)),
@@ -1222,6 +1434,70 @@ mod tests {
     }
 
     #[test]
+    fn eip7709_classification_in_window_is_cold_then_warm_in_same_tx() {
+        // Two BLOCKHASH calls in the same tx with the same arg → first cold, second warm.
+        // BLOCKHASH(1); POP; BLOCKHASH(1); STOP
+        let code = vec![
+            opcode::PUSH1,
+            0x01,
+            opcode::BLOCKHASH,
+            opcode::POP,
+            opcode::PUSH1,
+            0x01,
+            opcode::BLOCKHASH,
+            opcode::STOP,
+        ];
+        // Without injection: classification still computed via per-tx HashSet.
+        let rows = run_call_contract(code.clone(), TEST_BLOCK_NUMBER).rows;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].slot_warmth_class, "cold");
+        assert_eq!(rows[1].slot_warmth_class, "warm");
+        assert!(rows[0].is_in_window);
+        assert_eq!(rows[0].slot_index, Some(1));
+        assert_eq!(rows[0].eip7709_extra_cost, 2100);
+        assert_eq!(rows[1].eip7709_extra_cost, 100);
+        assert_eq!(rows[0].eip7709_new_cost, 2120);
+        assert_eq!(rows[1].eip7709_new_cost, 120);
+    }
+
+    #[test]
+    fn eip7709_out_of_window_charges_only_base() {
+        // BLOCKHASH(block.number) → delta = 0 → out_of_window → no SLOAD charge.
+        let code = vec![opcode::PUSH1, TEST_BLOCK_NUMBER as u8, opcode::BLOCKHASH, opcode::STOP];
+        let rows = run_call_contract(code, TEST_BLOCK_NUMBER).rows;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].slot_warmth_class, "out_of_window");
+        assert!(!rows[0].is_in_window);
+        assert_eq!(rows[0].eip7709_extra_cost, 0);
+        assert_eq!(rows[0].eip7709_new_cost, BASE_BLOCKHASH_COST);
+    }
+
+    #[test]
+    fn eip7709_simulate_oog_halts_the_tx() {
+        // Tight gas budget: tx pays the 21k intrinsic + a few opcodes; not enough for the cold
+        // SLOAD charge. With injection on, the call must Halt(OutOfGas).
+        let code = vec![opcode::PUSH1, 0x01, opcode::BLOCKHASH, opcode::STOP];
+        // 21_000 intrinsic + 3 (PUSH1) + 20 (BLOCKHASH) + 0 (STOP) = 21_023; with injection of
+        // 2100 extra the tx needs 23_123 and we only give 22_500.
+        let rows = run_call_contract_with(code, TEST_BLOCK_NUMBER, true, 22_500).rows;
+        // The event is still recorded (we capture pending_blockhash before halting).
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].tx_status.starts_with("Halt("), "got tx_status={}", rows[0].tx_status);
+        assert!(rows[0].eip7709_would_oog_frame);
+    }
+
+    #[test]
+    fn eip7709_simulate_succeeds_when_budget_is_sufficient() {
+        let code = vec![opcode::PUSH1, 0x01, opcode::BLOCKHASH, opcode::STOP];
+        let rows = run_call_contract_with(code, TEST_BLOCK_NUMBER, true, TEST_GAS_LIMIT).rows;
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].tx_status.starts_with("Success("));
+        // With injection, observed_gas_cost should reflect 20 + 2100.
+        assert_eq!(rows[0].observed_gas_cost, 2120);
+        assert!(!rows[0].eip7709_would_oog_frame);
+    }
+
+    #[test]
     fn parquet_writer_roundtrip_preserves_schema_and_row_count() -> eyre::Result<()> {
         let tempdir = tempdir()?;
         let output = tempdir.path().join("blockhash.parquet");
@@ -1250,17 +1526,27 @@ mod tests {
     }
 
     fn run_call_contract(code: Vec<u8>, block_number: u64) -> InspectorRun {
+        run_call_contract_with(code, block_number, false, TEST_GAS_LIMIT)
+    }
+
+    fn run_call_contract_with(
+        code: Vec<u8>,
+        block_number: u64,
+        inject_eip7709: bool,
+        gas_limit: u64,
+    ) -> InspectorRun {
         let bytecode = Bytecode::new_raw(Bytes::from(code));
         let context = Context::mainnet()
             .modify_block_chained(|block| block.number = U256::from(block_number))
             .with_db(BenchmarkDB::new_bytecode(bytecode));
-        let mut evm = context.build_mainnet_with_inspector(BlockhashImpactInspector::default());
+        let mut evm =
+            context.build_mainnet_with_inspector(BlockhashImpactInspector::new(inject_eip7709));
         let result = evm
             .inspect_one_tx(
                 revm::context::TxEnv::builder()
                     .caller(BENCH_CALLER)
                     .kind(TxKind::Call(BENCH_TARGET))
-                    .gas_limit(TEST_GAS_LIMIT)
+                    .gas_limit(gas_limit)
                     .build()
                     .unwrap(),
             )
@@ -1276,7 +1562,7 @@ mod tests {
                     to: Some(BENCH_TARGET),
                     nonce: 0,
                     tx_type: TEST_TX_TYPE,
-                    gas_limit: TEST_GAS_LIMIT,
+                    gas_limit,
                 },
                 &result,
             ),
@@ -1413,6 +1699,8 @@ mod tests {
     }
 
     fn sample_row(event_index: u64, gas_before: u64) -> BlockhashRow {
+        let warmth = WarmthClass::Cold;
+        let new_cost = warmth.total_cost();
         BlockhashRow {
             block_number: 12,
             block_hash: hex(B256::repeat_byte(0xaa)),
@@ -1443,6 +1731,13 @@ mod tests {
             gas_after: gas_before.saturating_sub(CURRENT_BLOCKHASH_COST),
             observed_gas_cost: CURRENT_BLOCKHASH_COST,
             extra_gas_headroom: gas_headroom(gas_before),
+            slot_index: Some(eip7709_slot_index(1)),
+            is_in_window: true,
+            slot_warmth_class: warmth.as_str().to_string(),
+            eip7709_extra_cost: warmth.extra_cost(),
+            eip7709_new_cost: new_cost,
+            eip7709_new_headroom: i64::try_from(gas_before).unwrap_or(i64::MAX) - new_cost as i64,
+            eip7709_would_oog_frame: gas_before < new_cost,
         }
     }
 }
