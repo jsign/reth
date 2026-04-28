@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use example_blockhash_impact::{
     analyze::{self, AnalyzeConfig},
+    info::{self, InfoConfig},
     scan_archive, ScanConfig,
 };
 use std::path::PathBuf;
@@ -19,6 +20,15 @@ enum Command {
     Scan(ScanArgs),
     /// Read a canonical and an EIP-7709 parquet and print the UX-impact report.
     Analyze(AnalyzeArgs),
+    /// Print the latest available block and approximate blocks 1w/1m/3m/6m/1y ago.
+    Info(InfoArgs),
+}
+
+#[derive(Debug, Parser)]
+struct InfoArgs {
+    /// Path to the canonical mainnet archive datadir. Opened read-only.
+    #[arg(long)]
+    datadir: PathBuf,
 }
 
 #[derive(Debug, Parser)]
@@ -84,7 +94,12 @@ fn main() -> eyre::Result<()> {
     match cli.command {
         Command::Scan(args) => run_scan(args),
         Command::Analyze(args) => run_analyze(args),
+        Command::Info(args) => run_info(args),
     }
+}
+
+fn run_info(args: InfoArgs) -> eyre::Result<()> {
+    info::run(InfoConfig { datadir: args.datadir })
 }
 
 fn run_scan(args: ScanArgs) -> eyre::Result<()> {

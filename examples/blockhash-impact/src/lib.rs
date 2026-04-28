@@ -54,6 +54,7 @@ use std::{
 
 pub mod analyze;
 pub mod eip7709;
+pub mod info;
 
 use eip7709::{
     is_in_window as eip7709_is_in_window, slot_index as eip7709_slot_index, WarmthClass,
