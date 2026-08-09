@@ -1,14 +1,16 @@
 //! Offline analysis of blockhash-impact parquet outputs.
 //!
 //! Reads two parquet files (canonical and EIP-7709 simulation), joins by
-//! `(block_number, tx_hash, event_index)`, and prints a UX-impact report. See [`report`] for the
-//! report shape and what each section means.
+//! `(block_number, tx_hash, event_index)`, and prints a BLOCKHASH usage report. See [`report`] for
+//! the report shape and what each section means.
 
 mod parquet_reader;
 mod report;
 
 pub use parquet_reader::read_rows;
-pub use report::{build_report, print_report, ClassSplit, GasPercentiles, Report, TopEntry};
+pub use report::{
+    build_report, print_report, Report, RepricingSplit, TopEntry, TopSection, WindowSplit,
+};
 
 use eyre::Context as _;
 use std::path::PathBuf;
