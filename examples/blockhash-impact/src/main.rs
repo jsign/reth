@@ -16,9 +16,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Replay a block range and emit one parquet row per executed BLOCKHASH event.
+    /// Replay a block range and emit paired EIP-7709 impact datasets.
     Scan(ScanArgs),
-    /// Read a canonical and an EIP-7709 parquet and print the UX-impact report.
+    /// Read a scan output directory and print the gas and breakage report.
     Analyze(AnalyzeArgs),
     /// Print the latest available block and approximate blocks 1w/1m/3m/6m/1y ago.
     Info(InfoArgs),
@@ -45,7 +45,7 @@ struct ScanArgs {
     #[arg(long)]
     to: u64,
 
-    /// Output parquet path.
+    /// Output directory for events.parquet, transactions.parquet, and manifest.json.
     #[arg(long)]
     output: PathBuf,
 
@@ -66,23 +66,13 @@ struct ScanArgs {
     /// This is significantly slower and uses more memory per worker.
     #[arg(long)]
     verify_execution: bool,
-
-    /// Inject EIP-7709 SLOAD-equivalent gas at every BLOCKHASH and trigger OOG cascading when a
-    /// frame can't afford it. Mutually exclusive with `--verify-execution` because injection
-    /// diverges canonical state and breaks state-root validation.
-    #[arg(long)]
-    simulate_eip7709: bool,
 }
 
 #[derive(Debug, Parser)]
 struct AnalyzeArgs {
-    /// Parquet produced by a canonical scan (no `--simulate-eip7709`).
+    /// Directory produced by `scan`.
     #[arg(long)]
-    canonical: PathBuf,
-
-    /// Parquet produced by `scan --simulate-eip7709`.
-    #[arg(long)]
-    eip7709: PathBuf,
+    input: PathBuf,
 
     /// How many entries to print per top-N category.
     #[arg(long, default_value_t = 20)]
@@ -112,7 +102,6 @@ fn run_scan(args: ScanArgs) -> eyre::Result<()> {
         blocks_per_chunk: args.blocks_per_chunk,
         flush_rows: args.flush_rows,
         verify_execution: args.verify_execution,
-        simulate_eip7709: args.simulate_eip7709,
     })?;
 
     println!(
@@ -123,20 +112,13 @@ fn run_scan(args: ScanArgs) -> eyre::Result<()> {
         summary.blocks_per_second()
     );
     println!(
-        "blocks_scanned={} txs_scanned={} txs_with_blockhash={} blockhash_events={} chunks_aborted={}",
+        "blocks_scanned={} txs_scanned={} txs_with_blockhash={} blockhash_events={} simulation_errors={}",
         summary.blocks_scanned,
         summary.txs_scanned,
         summary.txs_with_blockhash,
         summary.blockhash_events,
-        summary.chunks_aborted,
+        summary.simulation_errors,
     );
-    if summary.chunks_aborted > 0 {
-        println!(
-            "warning: {} chunk(s) were abandoned mid-execution due to EIP-7709 state divergence; \
-             the parquet covers a sparse subset of the requested range",
-            summary.chunks_aborted,
-        );
-    }
     println!(
         "min_gas_before={} output={}",
         summary
@@ -149,10 +131,6 @@ fn run_scan(args: ScanArgs) -> eyre::Result<()> {
 }
 
 fn run_analyze(args: AnalyzeArgs) -> eyre::Result<()> {
-    analyze::run(AnalyzeConfig {
-        canonical: args.canonical,
-        eip7709: args.eip7709,
-        top_n: args.top_n,
-    })?;
+    analyze::run(AnalyzeConfig { input: args.input, top_n: args.top_n })?;
     Ok(())
 }

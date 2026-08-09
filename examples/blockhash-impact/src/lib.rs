@@ -6,6 +6,7 @@ pub mod analyze;
 pub mod eip7709;
 pub mod info;
 
+mod impact;
 mod inspector;
 mod parquet_writer;
 mod progress;
@@ -13,5 +14,5 @@ mod row;
 mod scan;
 
 pub use inspector::BlockhashImpactInspector;
-pub use row::{BlockExecutionContext, BlockhashRow, TxExecutionMetadata};
-pub use scan::{scan_archive, ScanConfig, ScanSummary};
+pub use row::{BlockExecutionContext, BlockhashRow, TransactionImpactRow, TxExecutionMetadata};
+pub use scan::{scan_archive, Manifest, ScanConfig, ScanSummary};

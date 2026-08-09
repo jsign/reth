@@ -1,11 +1,7 @@
 //! revm `Inspector` that records every BLOCKHASH execution event.
 //!
-//! Two modes:
-//! - Observation: `inject_eip7709 == false` records canonical execution and only annotates rows
-//!   with the EIP-7709 classification (cold/warm/out-of-window/unknown).
-//! - Simulation: `inject_eip7709 == true` charges EIP-7709 SLOAD-equivalent gas on every in-window
-//!   BLOCKHASH and triggers OOG via `Interpreter::halt_oog` when a frame can't afford it, letting
-//!   revm unwind canonically.
+//! Gas injection lives in the opcode implementation in [`crate::eip7709`]. Keeping the inspector
+//! observational is important: storage warmth and rollback are owned by revm's journal.
 
 use alloy_primitives::Address;
 use reth_revm::revm::{
@@ -19,11 +15,12 @@ use reth_revm::revm::{
         Interpreter,
     },
 };
-use std::{collections::HashSet, fmt};
+use std::{collections::HashMap, fmt};
 
 use crate::{
     eip7709::{
-        is_in_window as eip7709_is_in_window, slot_index as eip7709_slot_index, WarmthClass,
+        clear_last_access, eip7709_enabled, is_in_window as eip7709_is_in_window,
+        slot_index as eip7709_slot_index, take_last_access, WarmthClass,
     },
     row::{
         block_number_delta, format_tx_status, gas_headroom, hex, BlockExecutionContext,
@@ -39,27 +36,10 @@ pub struct BlockhashImpactInspector {
     frames: Vec<FrameRecord>,
     events: Vec<BlockhashEventRecord>,
     pending_blockhash: Option<PendingBlockhash>,
-    /// When true, charges EIP-7709 SLOAD-equivalent gas at every BLOCKHASH and triggers OOG via
-    /// `Interpreter::halt_oog` on insufficient gas; otherwise observation-only.
-    inject_eip7709: bool,
-    /// Per-tx slot warmth simulation. When `inject_eip7709` is on, this mirrors the journal's
-    /// access list (we still use `ctx.sload` for the authoritative `is_cold`); when off, this is
-    /// the only warmth source. Reset every tx via [`Self::reset_for_next_tx`].
-    warmth_set: HashSet<u64>,
+    pc_occurrences: HashMap<(u64, u64), u32>,
 }
 
 impl BlockhashImpactInspector {
-    /// Constructs an inspector. `inject_eip7709 == true` simulates the new BLOCKHASH cost model in
-    /// revm; `false` records canonical execution and only annotates rows with classification.
-    pub fn new(inject_eip7709: bool) -> Self {
-        Self { inject_eip7709, ..Self::default() }
-    }
-
-    /// Whether this inspector charges EIP-7709 SLOAD gas during execution.
-    pub fn inject_eip7709(&self) -> bool {
-        self.inject_eip7709
-    }
-
     pub fn into_rows<H>(
         mut self,
         block: BlockExecutionContext,
@@ -69,6 +49,7 @@ impl BlockhashImpactInspector {
     where
         H: fmt::Debug,
     {
+        self.finalize_aborted_pending();
         if self.events.is_empty() {
             return Vec::new();
         }
@@ -106,6 +87,7 @@ impl BlockhashImpactInspector {
                     tx_status: tx_status.clone(),
                     event_index: event.event_index,
                     frame_id: frame.id,
+                    frame_path: frame.path.clone(),
                     parent_frame_id: frame.parent_frame_id,
                     frame_depth: frame.depth,
                     frame_kind: frame.kind.as_str().to_string(),
@@ -116,6 +98,7 @@ impl BlockhashImpactInspector {
                     frame_is_static: frame.is_static,
                     frame_end_status: frame.end_status.clone(),
                     pc: event.pc,
+                    pc_occurrence: event.pc_occurrence,
                     requested_block_number: event.requested_block_number,
                     requested_block_delta: event.requested_block_delta,
                     gas_before: event.gas_before,
@@ -129,9 +112,36 @@ impl BlockhashImpactInspector {
                     eip7709_new_cost,
                     eip7709_new_headroom,
                     eip7709_would_oog_frame,
+                    simulation_matched: false,
+                    simulation_event_index: None,
+                    simulation_gas_before: None,
+                    simulation_gas_after: None,
+                    simulation_observed_gas_cost: None,
+                    simulation_frame_end_status: None,
                 }
             })
             .collect()
+    }
+
+    fn finalize_aborted_pending(&mut self) {
+        let Some(pending) = self.pending_blockhash.take() else {
+            return;
+        };
+        let warmth_class = take_last_access().unwrap_or(pending.warmth_class);
+        self.events.push(BlockhashEventRecord {
+            frame_id: pending.frame_id,
+            event_index: pending.event_index,
+            pc: pending.pc,
+            pc_occurrence: pending.pc_occurrence,
+            requested_block_number: pending.requested_block_number,
+            requested_block_delta: pending.requested_block_delta,
+            slot_index: pending.slot_index,
+            is_in_window: pending.is_in_window,
+            warmth_class,
+            gas_before: pending.gas_before,
+            gas_after: 0,
+            observed_gas_cost: pending.gas_before,
+        });
     }
 
     fn enrich_root_frame<H>(
@@ -170,8 +180,21 @@ impl BlockhashImpactInspector {
 
         let parent_frame_id = self.frame_stack.last().copied();
         let depth = self.frame_stack.len() as u32;
+        let path = if let Some(parent_id) = parent_frame_id {
+            let parent = self
+                .frames
+                .iter_mut()
+                .find(|frame| frame.id == parent_id)
+                .expect("parent frame is tracked");
+            let child = parent.next_child_index;
+            parent.next_child_index += 1;
+            format!("{}.{}", parent.path, child)
+        } else {
+            "0".to_string()
+        };
         self.frames.push(FrameRecord {
             id: frame_id,
+            path,
             parent_frame_id,
             depth,
             kind,
@@ -181,6 +204,7 @@ impl BlockhashImpactInspector {
             gas_limit,
             is_static,
             end_status: None,
+            next_child_index: 0,
         });
         self.frame_stack.push(frame_id);
     }
@@ -233,58 +257,24 @@ where
         let in_window = requested_block_delta.is_some_and(eip7709_is_in_window);
         let slot = requested_block_number.map(eip7709_slot_index);
 
-        // Classify slot warmth via a per-tx `HashSet`. We don't consult `ctx.sload` because the
-        // host trait's `sload` requires the account to be already loaded (it returns
-        // `ColdLoadSkipped` otherwise), and `HISTORY_STORAGE_ADDRESS` is never touched by any
-        // canonical user-code instruction — so the simulation matches what an EIP-7709-aware EVM
-        // would observe.
-        let warmth_class = if !in_window {
-            WarmthClass::OutOfWindow
-        } else if let Some(slot) = slot {
-            if self.warmth_set.insert(slot) {
-                WarmthClass::Cold
-            } else {
-                WarmthClass::Warm
-            }
-        } else {
-            WarmthClass::Unknown
-        };
+        // The opcode records the actual journal access result after this callback. Canonical
+        // execution keeps in-window warmth unknown because it performs no storage access.
+        let warmth_class = if in_window { WarmthClass::Unknown } else { WarmthClass::OutOfWindow };
 
         let gas_before = interp.gas.remaining();
         let event_index = self.next_event_index;
         self.next_event_index += 1;
         let pc = interp.bytecode.pc() as u64;
-
-        // EIP-7709 charges `BASE + SLOAD-equivalent`. revm's instruction table charges the BASE
-        // (20) inside `Interpreter::step` AFTER this hook runs, so we only need to inject the
-        // SLOAD-equivalent extra here. If the frame can't afford it, halt with OOG and let revm
-        // unwind the call frame canonically. Note: when `halt_oog` is called the inspector loop
-        // breaks BEFORE `step_end` fires, so we must push the event row here directly.
-        if self.inject_eip7709 {
-            let extra = warmth_class.extra_cost();
-            if extra > 0 && !interp.gas.record_regular_cost(extra) {
-                interp.halt_oog();
-                self.events.push(BlockhashEventRecord {
-                    frame_id,
-                    event_index,
-                    pc,
-                    requested_block_number,
-                    requested_block_delta,
-                    slot_index: slot,
-                    is_in_window: in_window,
-                    warmth_class,
-                    gas_before,
-                    gas_after: 0,
-                    observed_gas_cost: gas_before,
-                });
-                return;
-            }
-        }
+        let occurrence = self.pc_occurrences.entry((frame_id, pc)).or_default();
+        let pc_occurrence = *occurrence;
+        *occurrence += 1;
+        clear_last_access();
 
         self.pending_blockhash = Some(PendingBlockhash {
             frame_id,
             event_index,
             pc,
+            pc_occurrence,
             requested_block_number,
             requested_block_delta,
             slot_index: slot,
@@ -308,7 +298,12 @@ where
             requested_block_delta: pending.requested_block_delta,
             slot_index: pending.slot_index,
             is_in_window: pending.is_in_window,
-            warmth_class: pending.warmth_class,
+            pc_occurrence: pending.pc_occurrence,
+            warmth_class: if eip7709_enabled() {
+                take_last_access().unwrap_or(pending.warmth_class)
+            } else {
+                pending.warmth_class
+            },
             gas_before: pending.gas_before,
             gas_after,
             observed_gas_cost: pending.gas_before.saturating_sub(gas_after),
@@ -376,6 +371,7 @@ where
 #[derive(Debug, Clone)]
 struct FrameRecord {
     id: u64,
+    path: String,
     parent_frame_id: Option<u64>,
     depth: u32,
     kind: FrameKind,
@@ -385,6 +381,7 @@ struct FrameRecord {
     gas_limit: u64,
     is_static: bool,
     end_status: Option<String>,
+    next_child_index: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -392,6 +389,7 @@ struct BlockhashEventRecord {
     frame_id: u64,
     event_index: u64,
     pc: u64,
+    pc_occurrence: u32,
     requested_block_number: Option<u64>,
     requested_block_delta: Option<i64>,
     slot_index: Option<u64>,
@@ -407,6 +405,7 @@ struct PendingBlockhash {
     frame_id: u64,
     event_index: u64,
     pc: u64,
+    pc_occurrence: u32,
     requested_block_number: Option<u64>,
     requested_block_delta: Option<i64>,
     slot_index: Option<u64>,
@@ -418,11 +417,15 @@ struct PendingBlockhash {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::eip7709::BASE_BLOCKHASH_COST;
+    use crate::eip7709::{
+        install_eip7709_instruction_raw, with_eip7709_enabled, BASE_BLOCKHASH_COST,
+        HISTORY_STORAGE_ADDRESS,
+    };
     use alloy_primitives::{address, B256, U256};
     use reth_revm::{
         revm::{
             bytecode::Bytecode,
+            context_interface::transaction::{AccessList, AccessListItem},
             database::{BenchmarkDB, CacheDB, EmptyDB, BENCH_CALLER, BENCH_TARGET},
             primitives::{Bytes, TxKind},
             state::AccountInfo,
@@ -539,8 +542,8 @@ mod tests {
             opcode::BLOCKHASH,
             opcode::STOP,
         ];
-        // Without injection: classification still computed via per-tx HashSet.
-        let rows = run_call_contract(code.clone(), TEST_BLOCK_NUMBER).rows;
+        let rows =
+            run_call_contract_with(code.clone(), TEST_BLOCK_NUMBER, true, TEST_GAS_LIMIT).rows;
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].slot_warmth_class, "cold");
         assert_eq!(rows[1].slot_warmth_class, "warm");
@@ -562,6 +565,30 @@ mod tests {
         assert!(!rows[0].is_in_window);
         assert_eq!(rows[0].eip7709_extra_cost, 0);
         assert_eq!(rows[0].eip7709_new_cost, BASE_BLOCKHASH_COST);
+    }
+
+    #[test]
+    fn eip7709_out_of_window_access_does_not_warm_its_slot() {
+        // At block 8200, requests 1 and 8192 map to slot 1. Only 8192 is in the 256-block window,
+        // so the earlier out-of-window request must leave the shared slot cold.
+        let code = vec![
+            opcode::PUSH1,
+            0x01,
+            opcode::BLOCKHASH,
+            opcode::POP,
+            opcode::PUSH2,
+            0x20,
+            0x00,
+            opcode::BLOCKHASH,
+            opcode::STOP,
+        ];
+        let rows = run_call_contract_with(code, 8_200, true, TEST_GAS_LIMIT).rows;
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].slot_index, Some(1));
+        assert_eq!(rows[0].slot_warmth_class, "out_of_window");
+        assert_eq!(rows[1].slot_index, Some(1));
+        assert_eq!(rows[1].slot_warmth_class, "cold");
     }
 
     #[test]
@@ -589,8 +616,186 @@ mod tests {
         assert!(!rows[0].eip7709_would_oog_frame);
     }
 
+    #[test]
+    fn access_list_prewarms_the_history_slot() {
+        let code = vec![opcode::PUSH1, 0x01, opcode::BLOCKHASH, opcode::STOP];
+        let access_list = AccessList(vec![AccessListItem {
+            address: HISTORY_STORAGE_ADDRESS,
+            storage_keys: vec![B256::from(U256::from(1).to_be_bytes())],
+        }]);
+        let rows = run_call_contract_with_access_list(
+            code,
+            TEST_BLOCK_NUMBER,
+            true,
+            TEST_GAS_LIMIT,
+            Some(access_list),
+        )
+        .rows;
+
+        assert_eq!(rows[0].slot_warmth_class, "warm");
+        assert_eq!(rows[0].observed_gas_cost, 120);
+    }
+
+    #[test]
+    fn successful_and_reverted_calls_follow_journal_warmth() {
+        let callee = address!("1000000000000000000000000000000000000010");
+        let successful_callee =
+            vec![opcode::PUSH1, 0x01, opcode::BLOCKHASH, opcode::POP, opcode::STOP];
+        let mut caller = call_contract_bytecode(callee);
+        caller.pop();
+        caller.extend_from_slice(&[opcode::PUSH1, 0x01, opcode::BLOCKHASH, opcode::STOP]);
+        let successful = run_nested_call_with_mode(
+            caller.clone(),
+            callee,
+            successful_callee,
+            TEST_BLOCK_NUMBER,
+            true,
+        )
+        .rows;
+        assert_eq!(successful.len(), 2);
+        assert_eq!(successful[0].slot_warmth_class, "cold");
+        assert_eq!(successful[1].slot_warmth_class, "warm");
+
+        let reverted_callee = vec![
+            opcode::PUSH1,
+            0x01,
+            opcode::BLOCKHASH,
+            opcode::PUSH1,
+            0x00,
+            opcode::PUSH1,
+            0x00,
+            opcode::REVERT,
+        ];
+        let reverted =
+            run_nested_call_with_mode(caller, callee, reverted_callee, TEST_BLOCK_NUMBER, true)
+                .rows;
+        assert_eq!(reverted.len(), 2);
+        assert_eq!(reverted[0].slot_warmth_class, "cold");
+        assert_eq!(reverted[1].slot_warmth_class, "cold");
+    }
+
+    #[test]
+    fn direct_history_contract_sload_prewarms_blockhash() {
+        let history_code =
+            vec![opcode::PUSH1, 0x00, opcode::CALLDATALOAD, opcode::SLOAD, opcode::STOP];
+        let caller_code = call_history_then_blockhash_bytecode();
+        let rows = run_nested_call_with_mode(
+            caller_code,
+            HISTORY_STORAGE_ADDRESS,
+            history_code,
+            TEST_BLOCK_NUMBER,
+            true,
+        )
+        .rows;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].slot_warmth_class, "warm");
+        assert_eq!(rows[0].observed_gas_cost, 120);
+    }
+
+    #[test]
+    fn gas_after_blockhash_can_change_successful_output() {
+        let code = vec![
+            opcode::PUSH1,
+            0x01,
+            opcode::BLOCKHASH,
+            opcode::POP,
+            opcode::GAS,
+            opcode::PUSH1,
+            0x00,
+            opcode::MSTORE,
+            opcode::PUSH1,
+            0x20,
+            opcode::PUSH1,
+            0x00,
+            opcode::RETURN,
+        ];
+        let canonical =
+            run_call_contract_with(code.clone(), TEST_BLOCK_NUMBER, false, TEST_GAS_LIMIT);
+        let simulated = run_call_contract_with(code, TEST_BLOCK_NUMBER, true, TEST_GAS_LIMIT);
+
+        assert!(canonical.result.result.is_success());
+        assert!(simulated.result.result.is_success());
+        assert_ne!(canonical.result.result.output(), simulated.result.result.output());
+        let impact = compare_runs(canonical, &simulated);
+        assert_eq!(impact.classification, "observable_change");
+        assert!(impact.output_changed);
+        assert!(!impact.state_changed);
+    }
+
+    #[test]
+    fn ordinary_repricing_is_gas_only_and_history_read_is_not_state() {
+        let code = vec![opcode::PUSH1, 0x01, opcode::BLOCKHASH, opcode::STOP];
+        let canonical =
+            run_call_contract_with(code.clone(), TEST_BLOCK_NUMBER, false, TEST_GAS_LIMIT);
+        let simulated = run_call_contract_with(code, TEST_BLOCK_NUMBER, true, TEST_GAS_LIMIT);
+        let impact = compare_runs(canonical, &simulated);
+
+        assert_eq!(impact.classification, "gas_only");
+        assert_eq!(impact.gas_delta, Some(2_100));
+        assert!(!impact.output_changed);
+        assert!(!impact.state_changed);
+    }
+
+    fn compare_runs(
+        mut canonical: InspectorRun,
+        simulated: &InspectorRun,
+    ) -> crate::row::TransactionImpactRow {
+        let (unmatched_canonical, unmatched_simulation) =
+            crate::impact::pair_event_rows(&mut canonical.rows, &simulated.rows);
+        let block = BlockExecutionContext {
+            block_number: TEST_BLOCK_NUMBER,
+            block_hash: B256::repeat_byte(0x22),
+            beneficiary: Address::ZERO,
+            base_fee: 0,
+        };
+        let tx = TxExecutionMetadata {
+            tx_index: 0,
+            tx_hash: B256::repeat_byte(0x11),
+            from: BENCH_CALLER,
+            to: Some(BENCH_TARGET),
+            nonce: 0,
+            tx_type: TEST_TX_TYPE,
+            gas_limit: TEST_GAS_LIMIT,
+            effective_gas_price: 0,
+            priority_fee_per_gas: 0,
+        };
+        crate::impact::compare_transaction(
+            block,
+            &tx,
+            &canonical.result,
+            Ok(&simulated.result),
+            crate::impact::TraceComparison {
+                canonical_rows: &canonical.rows,
+                simulated_rows: &simulated.rows,
+                unmatched_canonical_events: unmatched_canonical,
+                unmatched_simulation_events: unmatched_simulation,
+            },
+        )
+    }
+
+    #[test]
+    fn caught_inner_oog_keeps_the_transaction_successful() {
+        let callee = address!("1000000000000000000000000000000000000011");
+        let callee_code = vec![opcode::PUSH1, 0x01, opcode::BLOCKHASH, opcode::STOP];
+        let mut caller_code = call_contract_bytecode(callee);
+        let gas_immediate = caller_code.len() - 4;
+        caller_code[gas_immediate] = 0x01;
+        caller_code[gas_immediate + 1] = 0xf4;
+
+        let rows =
+            run_nested_call_with_mode(caller_code, callee, callee_code, TEST_BLOCK_NUMBER, true)
+                .rows;
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].tx_status.starts_with("Success("));
+        assert!(rows[0]
+            .frame_end_status
+            .as_deref()
+            .is_some_and(|status| status.starts_with("OutOfGas")));
+    }
+
     pub(super) struct InspectorRun {
         pub rows: Vec<BlockhashRow>,
+        pub result: revm::context::result::ResultAndState,
     }
 
     fn run_call_contract(code: Vec<u8>, block_number: u64) -> InspectorRun {
@@ -603,38 +808,55 @@ mod tests {
         inject_eip7709: bool,
         gas_limit: u64,
     ) -> InspectorRun {
+        run_call_contract_with_access_list(code, block_number, inject_eip7709, gas_limit, None)
+    }
+
+    fn run_call_contract_with_access_list(
+        code: Vec<u8>,
+        block_number: u64,
+        inject_eip7709: bool,
+        gas_limit: u64,
+        access_list: Option<AccessList>,
+    ) -> InspectorRun {
         let bytecode = Bytecode::new_raw(Bytes::from(code));
         let context = Context::mainnet()
             .modify_block_chained(|block| block.number = U256::from(block_number))
             .with_db(BenchmarkDB::new_bytecode(bytecode));
-        let mut evm =
-            context.build_mainnet_with_inspector(BlockhashImpactInspector::new(inject_eip7709));
-        let result = evm
-            .inspect_one_tx(
-                revm::context::TxEnv::builder()
-                    .caller(BENCH_CALLER)
-                    .kind(TxKind::Call(BENCH_TARGET))
-                    .gas_limit(gas_limit)
-                    .build()
-                    .unwrap(),
-            )
-            .unwrap();
-
-        InspectorRun {
-            rows: evm.inspector.into_rows(
-                BlockExecutionContext { block_number, block_hash: B256::repeat_byte(0x22) },
-                TxExecutionMetadata {
-                    tx_index: 0,
-                    tx_hash: B256::repeat_byte(0x11),
-                    from: BENCH_CALLER,
-                    to: Some(BENCH_TARGET),
-                    nonce: 0,
-                    tx_type: TEST_TX_TYPE,
-                    gas_limit,
-                },
-                &result,
-            ),
+        let evm = context.build_mainnet_with_inspector(BlockhashImpactInspector::default());
+        let mut evm = install_eip7709_instruction_raw(evm);
+        let mut tx = revm::context::TxEnv::builder()
+            .caller(BENCH_CALLER)
+            .kind(TxKind::Call(BENCH_TARGET))
+            .gas_limit(gas_limit);
+        if let Some(access_list) = access_list {
+            tx = tx.access_list(access_list);
         }
+        let tx = tx.build().unwrap();
+        let execute = || evm.inspect_tx(tx);
+        let result =
+            if inject_eip7709 { with_eip7709_enabled(execute) } else { execute() }.unwrap();
+
+        let rows = evm.inspector.into_rows(
+            BlockExecutionContext {
+                block_number,
+                block_hash: B256::repeat_byte(0x22),
+                beneficiary: Address::ZERO,
+                base_fee: 0,
+            },
+            TxExecutionMetadata {
+                tx_index: 0,
+                tx_hash: B256::repeat_byte(0x11),
+                from: BENCH_CALLER,
+                to: Some(BENCH_TARGET),
+                nonce: 0,
+                tx_type: TEST_TX_TYPE,
+                gas_limit,
+                effective_gas_price: 0,
+                priority_fee_per_gas: 0,
+            },
+            &result.result,
+        );
+        InspectorRun { rows, result }
     }
 
     fn run_nested_call(
@@ -642,6 +864,16 @@ mod tests {
         callee_address: Address,
         callee_code: Vec<u8>,
         block_number: u64,
+    ) -> InspectorRun {
+        run_nested_call_with_mode(caller_code, callee_address, callee_code, block_number, false)
+    }
+
+    fn run_nested_call_with_mode(
+        caller_code: Vec<u8>,
+        callee_address: Address,
+        callee_code: Vec<u8>,
+        block_number: u64,
+        inject_eip7709: bool,
     ) -> InspectorRun {
         let mut db = CacheDB::new(EmptyDB::default());
         db.insert_account_info(
@@ -672,9 +904,10 @@ mod tests {
         let context = Context::mainnet()
             .modify_block_chained(|block| block.number = U256::from(block_number))
             .with_db(db);
-        let mut evm = context.build_mainnet_with_inspector(BlockhashImpactInspector::default());
-        let result = evm
-            .inspect_one_tx(
+        let evm = context.build_mainnet_with_inspector(BlockhashImpactInspector::default());
+        let mut evm = install_eip7709_instruction_raw(evm);
+        let mut execute = || {
+            evm.inspect_tx(
                 revm::context::TxEnv::builder()
                     .caller(BENCH_CALLER)
                     .kind(TxKind::Call(BENCH_TARGET))
@@ -682,23 +915,31 @@ mod tests {
                     .build()
                     .unwrap(),
             )
-            .unwrap();
+        };
+        let result =
+            if inject_eip7709 { with_eip7709_enabled(execute) } else { execute() }.unwrap();
 
-        InspectorRun {
-            rows: evm.inspector.into_rows(
-                BlockExecutionContext { block_number, block_hash: B256::repeat_byte(0x33) },
-                TxExecutionMetadata {
-                    tx_index: 0,
-                    tx_hash: B256::repeat_byte(0x44),
-                    from: BENCH_CALLER,
-                    to: Some(BENCH_TARGET),
-                    nonce: 0,
-                    tx_type: TEST_TX_TYPE,
-                    gas_limit: TEST_GAS_LIMIT,
-                },
-                &result,
-            ),
-        }
+        let rows = evm.inspector.into_rows(
+            BlockExecutionContext {
+                block_number,
+                block_hash: B256::repeat_byte(0x33),
+                beneficiary: Address::ZERO,
+                base_fee: 0,
+            },
+            TxExecutionMetadata {
+                tx_index: 0,
+                tx_hash: B256::repeat_byte(0x44),
+                from: BENCH_CALLER,
+                to: Some(BENCH_TARGET),
+                nonce: 0,
+                tx_type: TEST_TX_TYPE,
+                gas_limit: TEST_GAS_LIMIT,
+                effective_gas_price: 0,
+                priority_fee_per_gas: 0,
+            },
+            &result.result,
+        );
+        InspectorRun { rows, result }
     }
 
     fn call_contract_bytecode(callee_address: Address) -> Vec<u8> {
@@ -717,6 +958,38 @@ mod tests {
         ];
         bytecode.extend_from_slice(callee_address.as_slice());
         bytecode.extend_from_slice(&[opcode::PUSH2, 0xff, 0xff, opcode::CALL, opcode::STOP]);
+        bytecode
+    }
+
+    fn call_history_then_blockhash_bytecode() -> Vec<u8> {
+        let mut bytecode = vec![
+            opcode::PUSH1,
+            0x01,
+            opcode::PUSH1,
+            0x00,
+            opcode::MSTORE,
+            opcode::PUSH1,
+            0x00,
+            opcode::PUSH1,
+            0x00,
+            opcode::PUSH1,
+            0x20,
+            opcode::PUSH1,
+            0x00,
+            opcode::PUSH20,
+        ];
+        bytecode.extend_from_slice(HISTORY_STORAGE_ADDRESS.as_slice());
+        bytecode.extend_from_slice(&[
+            opcode::PUSH2,
+            0xff,
+            0xff,
+            opcode::STATICCALL,
+            opcode::POP,
+            opcode::PUSH1,
+            0x01,
+            opcode::BLOCKHASH,
+            opcode::STOP,
+        ]);
         bytecode
     }
 

@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::row::BlockhashRow;
+use crate::row::{BlockhashRow, TransactionImpactRow};
 
 #[derive(Debug, Default)]
 pub struct Report {
@@ -20,6 +20,35 @@ pub struct Report {
     pub top_tx_recipients: TopSection,
     pub top_contracts: TopSection,
     pub top_code_addresses: TopSection,
+    pub impact: ImpactSummary,
+    pub top_affected_contracts: Vec<AffectedContract>,
+}
+
+#[derive(Debug, Default)]
+pub struct ImpactSummary {
+    pub unaffected: u64,
+    pub gas_only: u64,
+    pub observable_change: u64,
+    pub state_change: u64,
+    pub internal_breakage: u64,
+    pub simulation_error: u64,
+    pub new_tx_oog: u64,
+    pub total_gas_delta: i128,
+}
+
+#[derive(Debug, Clone)]
+pub struct AffectedContract {
+    pub address: String,
+    pub unique_transactions: u64,
+    pub unique_frames: u64,
+    pub semantic_transactions: u64,
+}
+
+#[derive(Debug, Default)]
+struct ContractAgg {
+    transactions: HashSet<(u64, String)>,
+    frames: HashSet<(u64, String, String)>,
+    semantic_transactions: HashSet<(u64, String)>,
 }
 
 #[derive(Debug, Default)]
@@ -160,6 +189,97 @@ pub fn build_report(canonical: &[BlockhashRow], eip7709: &[BlockhashRow], top_n:
     report
 }
 
+/// Build the report from the paired scan datasets.
+pub fn build_dataset_report(
+    events: &[BlockhashRow],
+    transactions: &[TransactionImpactRow],
+    top_n: usize,
+) -> Report {
+    let simulated_status_by_tx = transactions
+        .iter()
+        .filter_map(|tx| {
+            Some(((tx.block_number, tx.tx_hash.as_str()), tx.simulated_status.as_deref()?))
+        })
+        .collect::<HashMap<_, _>>();
+    let simulated = events
+        .iter()
+        .filter(|row| row.simulation_matched)
+        .map(|row| {
+            let mut row = row.clone();
+            row.gas_before = row.simulation_gas_before.unwrap_or(row.gas_before);
+            row.gas_after = row.simulation_gas_after.unwrap_or(row.gas_after);
+            row.observed_gas_cost =
+                row.simulation_observed_gas_cost.unwrap_or(row.observed_gas_cost);
+            row.frame_end_status = row.simulation_frame_end_status.clone();
+            if let Some(status) =
+                simulated_status_by_tx.get(&(row.block_number, row.tx_hash.as_str()))
+            {
+                row.tx_status = (*status).to_string();
+            }
+            row
+        })
+        .collect::<Vec<_>>();
+    let mut report = build_report(events, &simulated, top_n);
+    report.joined_rows = events.iter().filter(|row| row.simulation_matched).count();
+    report.canonical_only_rows = events.len() - report.joined_rows;
+    report.eip7709_only_rows =
+        transactions.iter().map(|tx| tx.unmatched_simulation_events as usize).sum();
+
+    for tx in transactions {
+        match tx.classification.as_str() {
+            "unaffected" => report.impact.unaffected += 1,
+            "gas_only" => report.impact.gas_only += 1,
+            "observable_change" => report.impact.observable_change += 1,
+            "state_change" => report.impact.state_change += 1,
+            "internal_breakage" => report.impact.internal_breakage += 1,
+            _ => report.impact.simulation_error += 1,
+        }
+        report.impact.new_tx_oog += u64::from(tx.new_tx_oog);
+        report.impact.total_gas_delta += i128::from(tx.gas_delta.unwrap_or_default());
+    }
+
+    let classification_by_tx = transactions
+        .iter()
+        .map(|tx| ((tx.block_number, tx.tx_hash.as_str()), tx.classification.as_str()))
+        .collect::<HashMap<_, _>>();
+    let mut contracts: HashMap<String, ContractAgg> = HashMap::new();
+    for event in events {
+        let Some(address) = event.frame_target.clone() else { continue };
+        let entry = contracts.entry(address).or_default();
+        let tx = (event.block_number, event.tx_hash.clone());
+        entry.transactions.insert(tx.clone());
+        entry.frames.insert((event.block_number, event.tx_hash.clone(), event.frame_path.clone()));
+        if classification_by_tx.get(&(event.block_number, event.tx_hash.as_str())).is_some_and(
+            |classification| {
+                matches!(
+                    *classification,
+                    "observable_change" | "state_change" | "internal_breakage"
+                )
+            },
+        ) {
+            entry.semantic_transactions.insert(tx);
+        }
+    }
+    report.top_affected_contracts = contracts
+        .into_iter()
+        .map(|(address, aggregate)| AffectedContract {
+            address,
+            unique_transactions: aggregate.transactions.len() as u64,
+            unique_frames: aggregate.frames.len() as u64,
+            semantic_transactions: aggregate.semantic_transactions.len() as u64,
+        })
+        .collect();
+    report.top_affected_contracts.sort_by(|a, b| {
+        b.semantic_transactions
+            .cmp(&a.semantic_transactions)
+            .then(b.unique_transactions.cmp(&a.unique_transactions))
+            .then(b.unique_frames.cmp(&a.unique_frames))
+            .then(a.address.cmp(&b.address))
+    });
+    report.top_affected_contracts.truncate(top_n);
+    report
+}
+
 pub fn print_report(report: &Report) {
     println!("=== EIP-7709 BLOCKHASH Usage Report ===");
     println!(
@@ -192,7 +312,33 @@ pub fn print_report(report: &Report) {
     );
     println!();
 
-    println!("--- 2. Top BLOCKHASH Users ---");
+    println!("--- 2. Transaction Impact ---");
+    println!(
+        "  unaffected: {} | gas-only: {} | observable: {} | persistent-state: {} | internal: {} | simulation-error: {}",
+        report.impact.unaffected,
+        report.impact.gas_only,
+        report.impact.observable_change,
+        report.impact.state_change,
+        report.impact.internal_breakage,
+        report.impact.simulation_error,
+    );
+    println!(
+        "  new transaction OOGs: {} | aggregate gas delta: {}",
+        report.impact.new_tx_oog, report.impact.total_gas_delta
+    );
+    println!("  affected contracts (ranked by unique transactions/frames):");
+    for entry in &report.top_affected_contracts {
+        println!(
+            "    {} txs={} frames={} semantic_txs={}",
+            entry.address,
+            entry.unique_transactions,
+            entry.unique_frames,
+            entry.semantic_transactions,
+        );
+    }
+    println!();
+
+    println!("--- 3. Top BLOCKHASH Users ---");
     print_top("senders (tx_from)", &report.top_senders);
     print_top("tx recipients (tx_to)", &report.top_tx_recipients);
     print_top("contracts (frame_target)", &report.top_contracts);
@@ -252,7 +398,7 @@ fn record_usage(
     entry.simulation_tx_oog += u64::from(simulation_tx_oog);
     entry.joined_usages += u64::from(joined);
     entry.simulation_frame_oog += u64::from(simulation_frame_oog);
-    if entry.sample_tx_hash.is_none() {
+    if entry.sample_tx_hash.as_ref().is_none_or(|sample| row.tx_hash < *sample) {
         entry.sample_tx_hash = Some(row.tx_hash.clone());
     }
 }
@@ -403,6 +549,21 @@ mod tests {
     }
 
     #[test]
+    fn report_sample_is_invariant_to_dataset_order() {
+        let forward =
+            vec![row(1, "tx-z", 0).with_sender("alice"), row(2, "tx-a", 0).with_sender("alice")];
+        let reverse = forward.iter().cloned().rev().collect::<Vec<_>>();
+
+        let forward_report = build_report(&forward, &[], 10);
+        let reverse_report = build_report(&reverse, &[], 10);
+        assert_eq!(forward_report.top_senders.entries[0].sample_tx_hash, "tx-a");
+        assert_eq!(
+            forward_report.top_senders.entries[0].sample_tx_hash,
+            reverse_report.top_senders.entries[0].sample_tx_hash
+        );
+    }
+
+    #[test]
     fn top_entries_count_immediate_and_simulation_oog() {
         let canonical = vec![
             row(1, "tx1", 0)
@@ -549,6 +710,7 @@ mod tests {
             tx_status: "Success(Stop)".to_string(),
             event_index,
             frame_id: event_index,
+            frame_path: "0".to_string(),
             parent_frame_id: None,
             frame_depth: 0,
             frame_kind: "tx_call".to_string(),
@@ -559,6 +721,7 @@ mod tests {
             frame_is_static: false,
             frame_end_status: Some("Stop".to_string()),
             pc: 0,
+            pc_occurrence: event_index as u32,
             requested_block_number: Some(1),
             requested_block_delta: Some(1),
             gas_before: 100_000,
@@ -572,6 +735,12 @@ mod tests {
             eip7709_new_cost: 2_120,
             eip7709_new_headroom: 97_880,
             eip7709_would_oog_frame: false,
+            simulation_matched: false,
+            simulation_event_index: None,
+            simulation_gas_before: None,
+            simulation_gas_after: None,
+            simulation_observed_gas_cost: None,
+            simulation_frame_end_status: None,
         }
     }
 }
