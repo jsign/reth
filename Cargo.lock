@@ -3775,6 +3775,7 @@ name = "example-blockhash-impact"
 version = "0.0.0"
 dependencies = [
  "alloy-consensus",
+ "alloy-eips 2.0.0",
  "alloy-evm",
  "alloy-primitives",
  "arrow",
@@ -3791,6 +3792,8 @@ dependencies = [
  "reth-revm",
  "reth-storage-api",
  "reth-tasks",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 

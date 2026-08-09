@@ -12,6 +12,7 @@ use reth_chainspec::{EthereumHardforks, MAINNET};
 use reth_ethereum::{evm::EthEvmConfig, node::EthereumNode};
 use reth_ethereum_consensus::validate_block_post_execution;
 use reth_evm::ConfigureEvm;
+use reth_fs_util as fs;
 use reth_provider::{providers::ReadOnlyConfig, BlockNumReader, BlockReader, ChainSpecProvider};
 use reth_revm::{
     database::StateProviderDatabase,
@@ -21,7 +22,7 @@ use reth_revm::{
 use reth_storage_api::{HashedPostStateProvider, StateRootProvider};
 use reth_tasks::Runtime;
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, Arc,
@@ -31,11 +32,14 @@ use std::{
 };
 
 use crate::{
+    eip7709::{install_eip7709_instruction, with_eip7709_enabled, EIP7709_REVISION},
+    impact::{compare_transaction, pair_event_rows, TraceComparison},
     inspector::BlockhashImpactInspector,
-    parquet_writer::{row_schema, write_rows},
+    parquet_writer::{row_schema, transaction_schema, write_datasets, OutputBatch},
     progress::report_progress,
-    row::{transaction_metadata, BlockExecutionContext, BlockhashRow},
+    row::{transaction_metadata, BlockExecutionContext, BlockhashRow, TransactionImpactRow},
 };
+use serde::{Deserialize, Serialize};
 
 /// Scanner configuration.
 #[derive(Debug, Clone)]
@@ -48,9 +52,6 @@ pub struct ScanConfig {
     pub blocks_per_chunk: u64,
     pub flush_rows: usize,
     pub verify_execution: bool,
-    /// When true, inject EIP-7709 SLOAD-equivalent gas at every BLOCKHASH step. Mutually
-    /// exclusive with `verify_execution` because gas injection diverges canonical state.
-    pub simulate_eip7709: bool,
 }
 
 /// Runtime summary emitted after a completed scan.
@@ -63,11 +64,31 @@ pub struct ScanSummary {
     pub txs_with_blockhash: u64,
     pub blockhash_events: u64,
     pub min_observed_gas_before: Option<u64>,
-    /// Chunks abandoned mid-execution under `--simulate-eip7709`. Their remaining blocks are
-    /// missing from the parquet output and analysis should treat the file as a sparse subset.
-    pub chunks_aborted: u64,
+    pub simulation_errors: u64,
     pub elapsed: Duration,
     pub output: PathBuf,
+}
+
+/// Machine-readable dataset provenance and coverage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Manifest {
+    pub schema_version: u32,
+    pub eip: String,
+    pub eip_revision: String,
+    pub chain: String,
+    pub requested_from: u64,
+    pub requested_to: u64,
+    pub resolved_from: u64,
+    pub resolved_to: u64,
+    pub blocks_scanned: u64,
+    pub transactions_scanned: u64,
+    pub affected_transactions: u64,
+    pub blockhash_events: u64,
+    pub simulation_errors: u64,
+    pub complete: bool,
+    pub verification_status: String,
+    pub worker_count: usize,
+    pub blocks_per_chunk: u64,
 }
 
 impl ScanSummary {
@@ -104,17 +125,41 @@ pub fn scan_archive(config: ScanConfig) -> eyre::Result<ScanSummary> {
     let jobs = config
         .jobs
         .unwrap_or_else(|| thread::available_parallelism().map(|value| value.get()).unwrap_or(1));
+    write_manifest(
+        &config.output,
+        &Manifest {
+            schema_version: 2,
+            eip: "EIP-7709".to_string(),
+            eip_revision: EIP7709_REVISION.to_string(),
+            chain: "mainnet".to_string(),
+            requested_from: config.from,
+            requested_to: config.to,
+            resolved_from,
+            resolved_to,
+            blocks_scanned: 0,
+            transactions_scanned: 0,
+            affected_transactions: 0,
+            blockhash_events: 0,
+            simulation_errors: 0,
+            complete: false,
+            verification_status: "pending".to_string(),
+            worker_count: jobs,
+            blocks_per_chunk: config.blocks_per_chunk,
+        },
+    )?;
     let next_block = Arc::new(AtomicU64::new(resolved_from));
     let cancelled = Arc::new(AtomicBool::new(false));
-    let (row_tx, row_rx) = mpsc::channel::<Vec<BlockhashRow>>();
+    let (row_tx, row_rx) = mpsc::channel::<OutputBatch>();
     let output = config.output.clone();
-    let schema = Arc::new(row_schema());
+    let event_schema = Arc::new(row_schema());
+    let tx_schema = Arc::new(transaction_schema());
 
     let writer_handle = thread::Builder::new()
         .name("blockhash-impact-writer".to_string())
         .spawn({
-            let schema = Arc::clone(&schema);
-            move || write_rows(output, schema, row_rx)
+            let event_schema = Arc::clone(&event_schema);
+            let tx_schema = Arc::clone(&tx_schema);
+            move || write_datasets(output, event_schema, tx_schema, row_rx)
         })
         .wrap_err("failed to spawn parquet writer thread")?;
 
@@ -156,8 +201,9 @@ pub fn scan_archive(config: ScanConfig) -> eyre::Result<ScanSummary> {
                 .spawn(move || {
                     let mut stats = WorkerStats::default();
                     let mut buffered_rows = Vec::with_capacity(flush_rows.max(1));
+                    let mut buffered_transactions = Vec::with_capacity(flush_rows.max(1));
 
-                    'chunks: loop {
+                    loop {
                         if cancelled.load(Ordering::Relaxed) {
                             break;
                         }
@@ -200,18 +246,16 @@ pub fn scan_archive(config: ScanConfig) -> eyre::Result<ScanSummary> {
                             let block_context = BlockExecutionContext {
                                 block_number: block.number(),
                                 block_hash: block.hash(),
+                                beneficiary: block.header().beneficiary(),
+                                base_fee: block.header().base_fee_per_gas().unwrap_or_default(),
                             };
 
-                            // Per-block scratch state. Rows and stat deltas land in `stats` /
-                            // `buffered_rows` only on success — under `--simulate-eip7709`, state
-                            // divergence can cause a tx mid-block to fail with e.g. block-budget
-                            // overflow, in which case we discard this block's data and abandon the
-                            // rest of the chunk (db is dirty after a partial block).
                             let mut block_rows: Vec<BlockhashRow> = Vec::new();
+                            let mut block_transactions: Vec<TransactionImpactRow> = Vec::new();
                             let mut block_txs_scanned: u64 = 0;
                             let mut block_txs_with_blockhash: u64 = 0;
 
-                            let block_result: eyre::Result<()> = (|| {
+                            (|| -> eyre::Result<()> {
                                 // Scope the executor so its `&mut db` borrow ends before the
                                 // optional verify branch needs `&mut db`.
                                 let execution_result = {
@@ -226,8 +270,9 @@ pub fn scan_archive(config: ScanConfig) -> eyre::Result<ScanSummary> {
                                     let evm = evm_config.evm_with_env_and_inspector(
                                         &mut db,
                                         evm_env,
-                                        BlockhashImpactInspector::new(config.simulate_eip7709),
+                                        BlockhashImpactInspector::default(),
                                     );
+                                    let evm = install_eip7709_instruction(evm);
                                     let mut executor =
                                         evm_config.create_executor(evm, execution_ctx);
 
@@ -243,9 +288,13 @@ pub fn scan_archive(config: ScanConfig) -> eyre::Result<ScanSummary> {
                                     {
                                         block_txs_scanned += 1;
                                         let tx_index = tx_index as u64;
-                                        let tx_metadata = transaction_metadata(tx_index, &tx);
-                                        let tx_result = executor
-                                            .execute_transaction_without_commit(tx)
+                                        let tx_metadata = transaction_metadata(
+                                            tx_index,
+                                            &tx,
+                                            block_context.base_fee,
+                                        );
+                                        let canonical_result = executor
+                                            .execute_transaction_without_commit(tx.clone())
                                             .wrap_err_with(|| {
                                                 format!(
                                                     "failed to execute transaction {tx_index} in block {}",
@@ -253,26 +302,73 @@ pub fn scan_archive(config: ScanConfig) -> eyre::Result<ScanSummary> {
                                                 )
                                             })?;
 
-                                        // Replace the inspector with a fresh one carrying the
-                                        // same injection flag so each tx gets isolated trace rows
-                                        // and a fresh per-tx warmth set, while block state still
-                                        // advances normally.
-                                        let rows = std::mem::replace(
+                                        let mut rows = std::mem::take(
                                             executor.evm_mut().inspector_mut(),
-                                            BlockhashImpactInspector::new(config.simulate_eip7709),
                                         )
                                         .into_rows(
                                             block_context,
-                                            tx_metadata,
-                                            &tx_result.result().result,
+                                            tx_metadata.clone(),
+                                            &canonical_result.result().result,
                                         );
 
                                         if !rows.is_empty() {
                                             block_txs_with_blockhash += 1;
+                                            let simulation_result = with_eip7709_enabled(|| {
+                                                executor.execute_transaction_without_commit(tx)
+                                            });
+                                            let simulation_rows = match &simulation_result {
+                                                Ok(result) => std::mem::take(
+                                                    executor.evm_mut().inspector_mut(),
+                                                )
+                                                .into_rows(
+                                                    block_context,
+                                                    tx_metadata.clone(),
+                                                    &result.result().result,
+                                                ),
+                                                Err(_) => {
+                                                    // Preserve any partial trace produced before an
+                                                    // execution-layer error.
+                                                    std::mem::take(
+                                                        executor.evm_mut().inspector_mut(),
+                                                    )
+                                                    .into_rows(
+                                                        block_context,
+                                                        tx_metadata.clone(),
+                                                        &canonical_result.result().result,
+                                                    )
+                                                }
+                                            };
+                                            let (unmatched_canonical, unmatched_simulation) =
+                                                pair_event_rows(&mut rows, &simulation_rows);
+                                            let simulation_error;
+                                            let simulated = match &simulation_result {
+                                                Ok(result) => Ok(result.result()),
+                                                Err(error) => {
+                                                    simulation_error = error.to_string();
+                                                    Err(simulation_error.as_str())
+                                                }
+                                            };
+                                            let impact = compare_transaction(
+                                                block_context,
+                                                &tx_metadata,
+                                                canonical_result.result(),
+                                                simulated,
+                                                TraceComparison {
+                                                    canonical_rows: &rows,
+                                                    simulated_rows: &simulation_rows,
+                                                    unmatched_canonical_events: unmatched_canonical,
+                                                    unmatched_simulation_events: unmatched_simulation,
+                                                },
+                                            );
+                                            if impact.simulation_error.is_some() {
+                                                stats.simulation_errors += 1;
+                                            }
+                                            block_transactions.push(impact);
                                             block_rows.extend(rows);
                                         }
 
-                                        executor.commit_transaction(tx_result).wrap_err_with(
+                                        // Only canonical state advances the historical replay.
+                                        executor.commit_transaction(canonical_result).wrap_err_with(
                                             || {
                                                 format!(
                                                     "failed to commit transaction {tx_index} in block {}",
@@ -304,39 +400,35 @@ pub fn scan_archive(config: ScanConfig) -> eyre::Result<ScanSummary> {
                                 }
 
                                 Ok(())
-                            })();
+                            })()?;
 
-                            match block_result {
-                                Ok(()) => {
-                                    stats.blocks_scanned += 1;
-                                    stats.txs_scanned += block_txs_scanned;
-                                    stats.txs_with_blockhash += block_txs_with_blockhash;
-                                    stats.record_rows(&block_rows);
-                                    buffered_rows.extend(block_rows);
-                                    if buffered_rows.len() >= flush_rows {
-                                        row_tx
-                                            .send(std::mem::take(&mut buffered_rows))
-                                            .wrap_err("failed to send row batch to writer")?;
-                                    }
-                                    blocks_completed.fetch_add(1, Ordering::Relaxed);
-                                }
-                                Err(err) if config.simulate_eip7709 => {
-                                    eprintln!(
-                                        "[simulate-eip7709] aborting chunk {chunk_start}..={chunk_end} at block {} due to state divergence: {err:#}",
-                                        block.number()
-                                    );
-                                    stats.chunks_aborted += 1;
-                                    continue 'chunks;
-                                }
-                                Err(err) => return Err(err),
+                            stats.blocks_scanned += 1;
+                            stats.txs_scanned += block_txs_scanned;
+                            stats.txs_with_blockhash += block_txs_with_blockhash;
+                            stats.record_rows(&block_rows);
+                            buffered_rows.extend(block_rows);
+                            buffered_transactions.extend(block_transactions);
+                            if buffered_rows.len() + buffered_transactions.len() >= flush_rows {
+                                row_tx
+                                    .send(OutputBatch {
+                                        events: std::mem::take(&mut buffered_rows),
+                                        transactions: std::mem::take(
+                                            &mut buffered_transactions,
+                                        ),
+                                    })
+                                    .wrap_err("failed to send dataset batch to writer")?;
                             }
+                            blocks_completed.fetch_add(1, Ordering::Relaxed);
                         }
                     }
 
-                    if !buffered_rows.is_empty() {
+                    if !buffered_rows.is_empty() || !buffered_transactions.is_empty() {
                         row_tx
-                            .send(buffered_rows)
-                            .wrap_err("failed to flush final row batch to writer")?;
+                            .send(OutputBatch {
+                                events: buffered_rows,
+                                transactions: buffered_transactions,
+                            })
+                            .wrap_err("failed to flush final dataset batch to writer")?;
                     }
 
                     Ok::<_, eyre::Report>(stats)
@@ -384,6 +476,37 @@ pub fn scan_archive(config: ScanConfig) -> eyre::Result<ScanSummary> {
 
     writer_result?;
 
+    let complete = aggregate.blocks_scanned == total_blocks;
+    let manifest = Manifest {
+        schema_version: 2,
+        eip: "EIP-7709".to_string(),
+        eip_revision: EIP7709_REVISION.to_string(),
+        chain: "mainnet".to_string(),
+        requested_from: config.from,
+        requested_to: config.to,
+        resolved_from,
+        resolved_to,
+        blocks_scanned: aggregate.blocks_scanned,
+        transactions_scanned: aggregate.txs_scanned,
+        affected_transactions: aggregate.txs_with_blockhash,
+        blockhash_events: aggregate.blockhash_events,
+        simulation_errors: aggregate.simulation_errors,
+        complete,
+        verification_status: if config.verify_execution {
+            "verified".to_string()
+        } else {
+            "not_requested".to_string()
+        },
+        worker_count: jobs,
+        blocks_per_chunk: config.blocks_per_chunk,
+    };
+    write_manifest(&config.output, &manifest)?;
+    eyre::ensure!(
+        complete,
+        "scan stopped after {} of {total_blocks} blocks; output manifest is incomplete",
+        aggregate.blocks_scanned
+    );
+
     Ok(ScanSummary {
         resolved_from,
         resolved_to,
@@ -392,10 +515,16 @@ pub fn scan_archive(config: ScanConfig) -> eyre::Result<ScanSummary> {
         txs_with_blockhash: aggregate.txs_with_blockhash,
         blockhash_events: aggregate.blockhash_events,
         min_observed_gas_before: aggregate.min_observed_gas_before,
-        chunks_aborted: aggregate.chunks_aborted,
+        simulation_errors: aggregate.simulation_errors,
         elapsed: started_at.elapsed(),
         output: config.output,
     })
+}
+
+fn write_manifest(output: &Path, manifest: &Manifest) -> eyre::Result<()> {
+    fs::create_dir_all(output)?;
+    fs::write(output.join("manifest.json"), serde_json::to_vec_pretty(manifest)?)?;
+    Ok(())
 }
 
 fn validate_config(config: &ScanConfig) -> eyre::Result<()> {
@@ -411,13 +540,6 @@ fn validate_config(config: &ScanConfig) -> eyre::Result<()> {
     if config.from > config.to {
         eyre::bail!("--from ({}) is greater than --to ({})", config.from, config.to);
     }
-    if config.simulate_eip7709 && config.verify_execution {
-        eyre::bail!(
-            "--simulate-eip7709 cannot be combined with --verify-execution: \
-             gas injection diverges canonical state, which breaks state-root validation"
-        );
-    }
-
     Ok(())
 }
 
@@ -473,10 +595,7 @@ struct WorkerStats {
     txs_with_blockhash: u64,
     blockhash_events: u64,
     min_observed_gas_before: Option<u64>,
-    /// Chunks abandoned mid-execution under `--simulate-eip7709` because state divergence caused
-    /// a tx to fail (e.g. block-budget overflow). The remaining blocks in those chunks are
-    /// missing from the parquet output.
-    chunks_aborted: u64,
+    simulation_errors: u64,
 }
 
 impl WorkerStats {
@@ -495,7 +614,7 @@ impl WorkerStats {
         self.txs_scanned += other.txs_scanned;
         self.txs_with_blockhash += other.txs_with_blockhash;
         self.blockhash_events += other.blockhash_events;
-        self.chunks_aborted += other.chunks_aborted;
+        self.simulation_errors += other.simulation_errors;
         self.min_observed_gas_before =
             match (self.min_observed_gas_before, other.min_observed_gas_before) {
                 (Some(left), Some(right)) => Some(left.min(right)),
