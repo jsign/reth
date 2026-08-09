@@ -368,14 +368,7 @@ pub fn scan_archive(config: ScanConfig) -> eyre::Result<ScanSummary> {
                                         }
 
                                         // Only canonical state advances the historical replay.
-                                        executor.commit_transaction(canonical_result).wrap_err_with(
-                                            || {
-                                                format!(
-                                                    "failed to commit transaction {tx_index} in block {}",
-                                                    block.number()
-                                                )
-                                            },
-                                        )?;
+                                        executor.commit_transaction(canonical_result);
                                     }
 
                                     executor.apply_post_execution_changes().wrap_err_with(|| {
